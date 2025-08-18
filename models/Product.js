@@ -1,6 +1,6 @@
 // models/Product.js
 const { DataTypes } = require('sequelize');
-const { sequelize } = require('../db'); // Asegúrate de importar tu instancia de Sequelize
+const { sequelize } = require('../db');
 
 const Product = sequelize.define('Product', {
   id: {
@@ -22,13 +22,13 @@ const Product = sequelize.define('Product', {
     allowNull: false
   },
   description: {
-    type: DataTypes.TEXT // TEXT para descripciones largas
+    type: DataTypes.TEXT
   },
   supplier_name: {
     type: DataTypes.STRING
   },
   o_price: {
-    type: DataTypes.DECIMAL(10, 2), // DECIMAL para precios
+    type: DataTypes.DECIMAL(10, 2),
     allowNull: false,
     validate: {
       min: {
@@ -58,7 +58,7 @@ const Product = sequelize.define('Product', {
     }
   },
   rec_date: {
-    type: DataTypes.DATEONLY // Solo fecha sin hora
+    type: DataTypes.DATEONLY
   },
   exp_date: {
     type: DataTypes.DATEONLY
@@ -72,15 +72,18 @@ const Product = sequelize.define('Product', {
   }
 }, {
   tableName: 'products',
-  timestamps: true, // Crea createdAt y updatedAt automáticamente
-  paranoid: true, // Habilita borrado lógico (crea deletedAt)
+  timestamps: true,
+  paranoid: true,
   indexes: [
     {
       unique: true,
-      fields: ['product_name', 'brand_name']
+      fields: ['product_name', 'brand_name'] // Índice compuesto único
     },
     {
-      //fields: ['category']
+      fields: ['category'] // Índice por categoría (corregido)
+    },
+    {
+      fields: ['barcode'] // Ya que es unique, conviene tenerlo como índice
     }
   ]
 });
