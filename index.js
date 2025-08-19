@@ -73,6 +73,7 @@ app.use('/api/products', require('./routes/products'));
 app.use('/api/customers', require('./routes/customers'));
 app.use('/api/suppliers', require('./routes/suppliers'));
 app.use('/api/reports', require('./routes/reports'));
+app.use('/api/sales', require('./routes/sales'));
 
 // Ruta de salud para verificar que el servidor está vivo
 app.get('/health', (req, res) => {
@@ -113,7 +114,6 @@ app.use('*', (req, res) => {
 });
 
 // Puerto dinámico para Railway
-//const PORT = process.env.PORT || 5000;
 const PORT = process.env.PORT || 5001;
 
 // Iniciar servidor
@@ -121,23 +121,29 @@ const startServer = async () => {
   try {
     // Conectar a la base de datos (usando la función corregida de db.js)
     await connectToMySQL();
-    
     console.log('✅ Conexión a MySQL exitosa');
 
-    // Sincronizar tablas - ¡CUIDADO EN PRODUCCIÓN!
-    // En producción es mejor usar migraciones en lugar de sync()
-    const syncOptions = process.env.NODE_ENV === 'production' 
-      ? { alter: false }  // En producción, no alterar tablas automáticamente
-      : { alter: true };  // En desarrollo, permitir alteraciones
+    // ⚠️ ¡IMPORTANTE! Desactiva la sincronización automática
+    // En su lugar, usa solo authenticate() y maneja las tablas manualmente
+    // await sequelize.sync({ force: true }); // ¡BORRA TODOS LOS DATOS!
+    // await sequelize.sync({ alter: true }); // ¡MODIFICA ESTRUCTURA!
+    
+    console.log('✅ Base de datos conectada (sin sincronización automática)');
 
-    await sequelize.sync(syncOptions);
-    console.log('✅ Tablas sincronizadas correctamente');
+    // Verificar manualmente las tablas importantes
+    try {
+      const [tables] = await sequelize.query('SHOW TABLES');
+      console.log('📊 Tablas existentes en la BD:', tables.map(t => t.Tables_in_pos_db));
+    } catch (queryError) {
+      console.log('ℹ️ No se pudieron listar las tablas (puede ser normal)');
+    }
 
     // Iniciar servidor
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
       console.log(`🌐 URL: http://localhost:${PORT}`);
       console.log(`🏥 Health check: http://localhost:${PORT}/health`);
+      console.log('💡 NOTA: Las tablas no se sincronizan automáticamente');
     });
 
   } catch (error) {
