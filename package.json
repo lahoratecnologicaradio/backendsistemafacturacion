@@ -4,6 +4,8 @@
   "description": "POS - point of sale of a Pharmacy",
   "main": "index.js",
   "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "",
@@ -16,5 +18,9 @@
     "mysql2": "^3.14.3",
     "nodemon": "^3.0.1",
     "sequelize": "^6.37.7"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
   }
 }
