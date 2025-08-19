@@ -3,39 +3,19 @@ const router = express.Router();
 const { validationResult } = require('express-validator');
 const { sequelize } = require('../db');
 const Customer = require('../models/Customer');
+const Product = require('../models/Product');
 
 // ROUTE-1: Obtener todos los clientes
 router.get('/fetchallcustomers', async (req, res) => {
   try {
-    console.log('🔍 Entorno:', process.env.NODE_ENV);
-    console.log('🔍 DB_HOST:', process.env.DB_HOST);
-    console.log('🔍 DB_NAME:', process.env.DB_NAME);
-    
-    // 1. Verificar conexión
-    await sequelize.authenticate();
-    console.log('✅ Conexión a BD exitosa');
+    const products = await Product.findAll(); // Método correcto de Sequelize
+    res.json(products);
 
-    // 2. Verificar tablas existentes
-    const tables = await sequelize.showAllSchemas();
-    console.log('📊 Bases de datos disponibles:', tables);
-    
-    const currentTables = await sequelize.getQueryInterface().showAllTables();
-    console.log('📊 Tablas en la BD actual:', currentTables);
 
-    // Resto de tu código...
-    
-  } catch (error) {
-    console.error('❌ ERROR RAILWAY:', error.message);
-    console.error('📌 Error code:', error.code);
-    console.error('📌 Error number:', error.errno);
-    
-    res.status(500).json({ 
-      error: 'Error del servidor',
-      details: process.env.NODE_ENV === 'production' 
-        ? 'Contacte al administrador' 
-        : error.message
-    });
-  }
+} catch (error) {
+    console.error(error.message);
+    res.status(500).send("Internal Server Error");
+}
 });
 
 // ROUTE-2: Agregar nuevo cliente
