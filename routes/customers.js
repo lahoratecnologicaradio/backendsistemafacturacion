@@ -8,6 +8,7 @@ const Customer = require('../models/Customer');
 router.get('/fetchallcustomers', async (req, res) => {
   try {
     console.log('🔍 INICIANDO DIAGNÓSTICO COMPLETO...');
+    console.log('🔍 INICIANDO DIAGNÓSTICO COMPLETO...');
     
     // 1. Verificar conexión
     await sequelize.authenticate();
