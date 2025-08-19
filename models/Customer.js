@@ -30,15 +30,10 @@ const Customer = sequelize.define('Customer', {
   due_date: {
     type: DataTypes.DATE
   }
-  // ⚠️ REMUEVE las definiciones manuales de createdAt y updatedAt
-  // Sequelize las maneja automáticamente
 }, {
   tableName: 'customers',
-  timestamps: true, // Habilita timestamps
-  underscored: false, // ⬅️ ¡IMPORTANTE! Cambia a FALSE
-  // Especifica los nombres exactos de las columnas:
-  createdAt: 'createdAt', // nombre exacto en tu BD
-  updatedAt: 'updatedAt'   // nombre exacto en tu BD
+  timestamps: true,    // Esto es suficiente
+  underscored: false   // camelCase por defecto
 });
 
 module.exports = Customer;
