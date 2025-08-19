@@ -3,19 +3,18 @@ const router = express.Router();
 const { validationResult } = require('express-validator');
 const { sequelize } = require('../db');
 const Customer = require('../models/Customer');
-const Product = require('../models/Product');
+
 
 // ROUTE-1: Obtener todos los clientes
 router.get('/fetchallcustomers', async (req, res) => {
   try {
-    const products = await Product.findAll(); // Método correcto de Sequelize
-    res.json(products);
+    const customers = await Customer.findAll(); // Método correcto de Sequelize
+    res.json(customers);
 
-
-} catch (error) {
+  } catch (error) {
     console.error(error.message);
     res.status(500).send("Internal Server Error");
-}
+  }
 });
 
 // ROUTE-2: Agregar nuevo cliente
