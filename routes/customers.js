@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { validationResult } = require('express-validator');
+const { sequelize } = require('../db');
 const Customer = require('../models/Customer');
 
 // ROUTE-1: Obtener todos los clientes
