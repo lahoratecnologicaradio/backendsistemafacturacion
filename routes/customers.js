@@ -8,7 +8,6 @@ const Customer = require('../models/Customer');
 router.get('/fetchallcustomers', async (req, res) => {
   try {
     console.log('🔍 INICIANDO DIAGNÓSTICO COMPLETO...');
-    console.log('🔍 INICIANDO DIAGNÓSTICO COMPLETO...');
     
     // 1. Verificar conexión
     await sequelize.authenticate();
@@ -21,7 +20,7 @@ router.get('/fetchallcustomers', async (req, res) => {
     // 3. Verificar estructura REAL de la tabla en MySQL
     console.log('🔍 Obteniendo estructura real de la tabla...');
     const [tableStructure] = await sequelize.query('DESCRIBE customers');
-    console.log('📋 Estructura real de customers:', tableStructure);
+    //console.log('📋 Estructura real de customers:', tableStructure);
 
     // 4. Verificar estructura del MODELO Sequelize
     console.log('🔍 Estructura del modelo Customer:');
@@ -59,7 +58,7 @@ router.get('/fetchallcustomers', async (req, res) => {
     console.error('📌 STACK:', error.stack);
     res.status(500).json({ 
       error: 'Error del servidor',
-      details: process.env.NODE_ENV === 'development' ? error.message : 'Contacte al administrador'
+      details: process.env.NODE_ENV === 'development' ? error.message : 'Contacte al administrador 2'
     });
   }
 });
