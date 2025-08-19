@@ -10,49 +10,32 @@ router.get('/fetchallcustomers', async (req, res) => {
   try {
     console.log('🔍 Iniciando fetchallcustomers...');
     
-    // 1. Verificar que el modelo Customer existe
-    console.log('📋 Modelo Customer:', Customer ? 'OK' : 'NO DEFINIDO');
-    
-    // 2. Verificar conexión a la BD
+    // Verificar conexión
     await sequelize.authenticate();
     console.log('✅ Conexión a BD exitosa');
-    
-    // 3. Verificar que la tabla existe
+
+    // Verificar tablas
     const tables = await sequelize.getQueryInterface().showAllTables();
     console.log('📊 Tablas en la BD:', tables);
     
-    const customerTableExists = tables.some(table => table.toLowerCase() === 'customers');
-    console.log('📦 Tabla customers existe:', customerTableExists);
-    
-    if (!customerTableExists) {
-      return res.status(500).json({ 
-        error: 'Tabla no existe',
-        details: 'La tabla customers no fue encontrada en la base de datos'
-      });
-    }
-    
-    // 4. Intentar consulta directa SQL primero
-    console.log('🔍 Probando consulta SQL directa...');
-    const [rawResults] = await sequelize.query('SELECT COUNT(*) as count FROM customers');
-    console.log('📊 Registros en tabla (RAW):', rawResults[0].count);
-    
-    // 5. Intentar findAll de Sequelize
-    console.log('🔍 Probando Customer.findAll()...');
+    // Buscar customers
     const customers = await Customer.findAll();
-    console.log(`✅ ${customers.length} clientes encontrados con Sequelize`);
+    console.log(`✅ ${customers.length} clientes encontrados`);
     
     res.json(customers);
 
   } catch (error) {
-    console.error('❌ ERROR COMPLETO:');
-    console.error('Mensaje:', error.message);
-    console.error('Stack:', error.stack);
-    console.error('Código:', error.code);
-    console.error('Errno:', error.errno);
+    // ¡IMPORTANTE! Siempre muestra el error real en consola
+    console.error('❌ ERROR REAL:', error.message);
+    console.error('📌 STACK:', error.stack);
+    console.error('🔍 CÓDIGO:', error.code);
+    console.error('📋 ERRNO:', error.errno);
     
+    // Devuelve el error REAL en la respuesta también
     res.status(500).json({ 
       error: 'Internal Server Error',
-      details: process.env.NODE_ENV === 'development' ? error.message : 'Contacte al administrador'
+      details: error.message, // ← Esto muestra el error real
+      code: error.code
     });
   }
 });
