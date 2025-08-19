@@ -1,4 +1,4 @@
-// backend/index.js
+/*// backend/index.js
 const express = require('express');
 const cors = require('cors');
 const { sequelize } = require('./db'); // Importamos Sequelize
@@ -41,5 +41,115 @@ const startServer = async () => {
     console.error('Error conectando a MySQL:', error);
   }
 };
+
+startServer();*/
+
+// backend/index.js
+const express = require('express');
+const cors = require('cors');
+const { sequelize, connectToMySQL } = require('./db'); // Importamos la conexión corregida
+
+// Importar modelos
+const Customer = require('./models/Customer');
+const Product = require('./models/Product');
+const Supplier = require('./models/Supplier');
+const { Invoice, Productsale } = require('./models/Report');
+
+// Inicializar Express
+const app = express();
+
+// Middlewares
+app.use(cors());
+app.use(express.json());
+
+// Middleware de logging para debugging
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  next();
+});
+
+// Rutas
+app.use('/api/products', require('./routes/products'));
+app.use('/api/customers', require('./routes/customers'));
+app.use('/api/suppliers', require('./routes/suppliers'));
+app.use('/api/reports', require('./routes/reports'));
+
+// Ruta de salud para verificar que el servidor está vivo
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'OK', 
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
+// Ruta raíz
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'API de Sistema de Facturación',
+    version: '1.0.0',
+    endpoints: {
+      products: '/api/products',
+      customers: '/api/customers',
+      suppliers: '/api/suppliers',
+      reports: '/api/reports',
+      health: '/health'
+    }
+  });
+});
+
+// Manejo de errores global
+app.use((error, req, res, next) => {
+  console.error('Error no manejado:', error);
+  res.status(500).json({
+    error: 'Error interno del servidor',
+    message: process.env.NODE_ENV === 'production' ? 'Something went wrong' : error.message
+  });
+});
+
+// Ruta 404
+app.use('*', (req, res) => {
+  res.status(404).json({ error: 'Endpoint no encontrado' });
+});
+
+// Puerto dinámico para Railway
+const PORT = process.env.PORT || 5000;
+
+// Iniciar servidor
+const startServer = async () => {
+  try {
+    // Conectar a la base de datos (usando la función corregida de db.js)
+    await connectToMySQL();
+    
+    console.log('✅ Conexión a MySQL exitosa');
+
+    // Sincronizar tablas - ¡CUIDADO EN PRODUCCIÓN!
+    // En producción es mejor usar migraciones en lugar de sync()
+    const syncOptions = process.env.NODE_ENV === 'production' 
+      ? { alter: false }  // En producción, no alterar tablas automáticamente
+      : { alter: true };  // En desarrollo, permitir alteraciones
+
+    await sequelize.sync(syncOptions);
+    console.log('✅ Tablas sincronizadas correctamente');
+
+    // Iniciar servidor
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+      console.log(`🌐 URL: http://localhost:${PORT}`);
+      console.log(`🏥 Health check: http://localhost:${PORT}/health`);
+    });
+
+  } catch (error) {
+    console.error('❌ Error iniciando el servidor:', error);
+    process.exit(1); // Salir con error
+  }
+};
+
+// Manejo de cierre graceful
+process.on('SIGINT', async () => {
+  console.log('🛑 Cerrando servidor...');
+  await sequelize.close();
+  process.exit(0);
+});
 
 startServer();
