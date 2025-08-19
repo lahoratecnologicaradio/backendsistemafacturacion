@@ -8,12 +8,52 @@ const Customer = require('../models/Customer');
 // ROUTE-1: Obtener todos los clientes
 router.get('/fetchallcustomers', async (req, res) => {
   try {
-    const customers = await Customer.findAll(); // Método correcto de Sequelize
+    console.log('🔍 Iniciando fetchallcustomers...');
+    
+    // 1. Verificar que el modelo Customer existe
+    console.log('📋 Modelo Customer:', Customer ? 'OK' : 'NO DEFINIDO');
+    
+    // 2. Verificar conexión a la BD
+    await sequelize.authenticate();
+    console.log('✅ Conexión a BD exitosa');
+    
+    // 3. Verificar que la tabla existe
+    const tables = await sequelize.getQueryInterface().showAllTables();
+    console.log('📊 Tablas en la BD:', tables);
+    
+    const customerTableExists = tables.some(table => table.toLowerCase() === 'customers');
+    console.log('📦 Tabla customers existe:', customerTableExists);
+    
+    if (!customerTableExists) {
+      return res.status(500).json({ 
+        error: 'Tabla no existe',
+        details: 'La tabla customers no fue encontrada en la base de datos'
+      });
+    }
+    
+    // 4. Intentar consulta directa SQL primero
+    console.log('🔍 Probando consulta SQL directa...');
+    const [rawResults] = await sequelize.query('SELECT COUNT(*) as count FROM customers');
+    console.log('📊 Registros en tabla (RAW):', rawResults[0].count);
+    
+    // 5. Intentar findAll de Sequelize
+    console.log('🔍 Probando Customer.findAll()...');
+    const customers = await Customer.findAll();
+    console.log(`✅ ${customers.length} clientes encontrados con Sequelize`);
+    
     res.json(customers);
 
   } catch (error) {
-    console.error(error.message);
-    res.status(500).send("Internal Server Error");
+    console.error('❌ ERROR COMPLETO:');
+    console.error('Mensaje:', error.message);
+    console.error('Stack:', error.stack);
+    console.error('Código:', error.code);
+    console.error('Errno:', error.errno);
+    
+    res.status(500).json({ 
+      error: 'Internal Server Error',
+      details: process.env.NODE_ENV === 'development' ? error.message : 'Contacte al administrador'
+    });
   }
 });
 
