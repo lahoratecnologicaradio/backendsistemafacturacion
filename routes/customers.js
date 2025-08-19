@@ -6,24 +6,55 @@ const Customer = require('../models/Customer');
 // ROUTE-1: Obtener todos los clientes
 router.get('/fetchallcustomers', async (req, res) => {
   try {
-    console.log('🔍 Verificando conexión y tabla...');
+    console.log('🔍 INICIANDO DIAGNÓSTICO COMPLETO...');
     
     // 1. Verificar conexión
     await sequelize.authenticate();
     console.log('✅ Conexión a BD exitosa');
 
-    // 2. Verificar acceso directo a la tabla
+    // 2. Verificar que la tabla existe con consulta directa
     const [results] = await sequelize.query('SELECT COUNT(*) as count FROM customers');
     console.log('📊 Registros en tabla customers:', results[0].count);
 
-    // 3. Intentar findAll
+    // 3. Verificar estructura REAL de la tabla en MySQL
+    console.log('🔍 Obteniendo estructura real de la tabla...');
+    const [tableStructure] = await sequelize.query('DESCRIBE customers');
+    console.log('📋 Estructura real de customers:', tableStructure);
+
+    // 4. Verificar estructura del MODELO Sequelize
+    console.log('🔍 Estructura del modelo Customer:');
+    console.log('Nombre de tabla:', Customer.tableName);
+    console.log('Columnas del modelo:', Object.keys(Customer.rawAttributes));
+    
+    // 5. Comparar columnas
+    const modelColumns = Object.keys(Customer.rawAttributes);
+    const realColumns = tableStructure.map(col => col.Field);
+    
+    console.log('🔍 Comparación de columnas:');
+    console.log('Modelo:', modelColumns);
+    console.log('Real:  ', realColumns);
+    
+    // 6. Buscar diferencias
+    const missingInModel = realColumns.filter(col => !modelColumns.includes(col));
+    const missingInReal = modelColumns.filter(col => !realColumns.includes(col));
+    
+    console.log('❌ Columnas en tabla pero no en modelo:', missingInModel);
+    console.log('❌ Columnas en modelo pero no en tabla:', missingInReal);
+
+    // 7. Intentar consulta específica
+    console.log('🔍 Probando consulta específica...');
+    const [sampleData] = await sequelize.query('SELECT * FROM customers LIMIT 1');
+    console.log('📊 Datos de muestra:', sampleData);
+
+    // 8. Solo entonces intentar findAll
+    console.log('🔍 Intentando findAll...');
     const customers = await Customer.findAll();
     console.log(`✅ Clientes encontrados vía Sequelize: ${customers.length}`);
     
     res.json(customers);
   } catch (error) {
-    console.error('❌ Error completo:', error);
-    console.error('📌 Stack:', error.stack);
+    console.error('❌ ERROR COMPLETO:', error);
+    console.error('📌 STACK:', error.stack);
     res.status(500).json({ 
       error: 'Error del servidor',
       details: process.env.NODE_ENV === 'development' ? error.message : 'Contacte al administrador'
