@@ -113,7 +113,8 @@ app.use('*', (req, res) => {
 });
 
 // Puerto dinámico para Railway
-const PORT = process.env.PORT || 5000;
+//const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
 
 // Iniciar servidor
 const startServer = async () => {
