@@ -58,7 +58,7 @@ router.get('/fetchallcustomers', async (req, res) => {
     console.error('📌 STACK:', error.stack);
     res.status(500).json({ 
       error: 'Error del servidor',
-      details: process.env.NODE_ENV === 'development' ? error.message : 'Contacte al administrador'
+      details: process.env.NODE_ENV === 'development' ? error.message : 'Contacte al administrador 2'
     });
   }
 });
