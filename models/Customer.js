@@ -1,6 +1,6 @@
 // models/Customer.js
 const { DataTypes } = require('sequelize');
-const { sequelize } = require('../db'); // Asegúrate de tener tu conexión a Sequelize
+const { sequelize } = require('../db');
 
 const Customer = sequelize.define('Customer', {
   id: {
@@ -19,29 +19,26 @@ const Customer = sequelize.define('Customer', {
     type: DataTypes.STRING
   },
   c_number: {
-    type: DataTypes.BIGINT // Usamos BIGINT para números de teléfono largos
+    type: DataTypes.BIGINT
   },
   note: {
-    type: DataTypes.TEXT // TEXT para notas más largas
+    type: DataTypes.TEXT
   },
   total: {
-    type: DataTypes.DECIMAL(10, 2) // DECIMAL para cantidades monetarias
+    type: DataTypes.DECIMAL(10, 2)
   },
   due_date: {
     type: DataTypes.DATE
-  },
-  createdAt: { // Sequelize añade esto automáticamente, pero puedes definirlo explícitamente
-    type: DataTypes.DATE,
-    defaultValue: DataTypes.NOW
-  },
-  updatedAt: {
-    type: DataTypes.DATE,
-    defaultValue: DataTypes.NOW
   }
+  // ⚠️ REMUEVE las definiciones manuales de createdAt y updatedAt
+  // Sequelize las maneja automáticamente
 }, {
-  tableName: 'customers', // Nombre exacto de la tabla en MySQL
-  timestamps: true, // Habilita createdAt y updatedAt
-  underscored: true // Opcional: convierte camelCase a snake_case
+  tableName: 'customers',
+  timestamps: true, // Habilita timestamps
+  underscored: false, // ⬅️ ¡IMPORTANTE! Cambia a FALSE
+  // Especifica los nombres exactos de las columnas:
+  createdAt: 'createdAt', // nombre exacto en tu BD
+  updatedAt: 'updatedAt'   // nombre exacto en tu BD
 });
 
 module.exports = Customer;
