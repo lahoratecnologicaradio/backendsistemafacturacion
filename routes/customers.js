@@ -6,24 +6,24 @@ const Customer = require('../models/Customer');
 // ROUTE-1: Obtener todos los clientes
 router.get('/fetchallcustomers', async (req, res) => {
   try {
-    console.log('🔍 Intentando obtener clientes...');
+    console.log('🔍 Verificando conexión y tabla...');
     
-    // Verificar conexión primero
+    // 1. Verificar conexión
     await sequelize.authenticate();
     console.log('✅ Conexión a BD exitosa');
 
-    // Verificar si la tabla existe
-    const tableExists = await sequelize.getQueryInterface().showAllTables();
-    console.log('📊 Tablas existentes:', tableExists);
+    // 2. Verificar acceso directo a la tabla
+    const [results] = await sequelize.query('SELECT COUNT(*) as count FROM customers');
+    console.log('📊 Registros en tabla customers:', results[0].count);
 
+    // 3. Intentar findAll
     const customers = await Customer.findAll();
-    console.log(`✅ Clientes encontrados: ${customers.length}`);
+    console.log(`✅ Clientes encontrados vía Sequelize: ${customers.length}`);
     
     res.json(customers);
   } catch (error) {
-    console.error('❌ Error al obtener clientes:', error.message);
-    console.error('📌 Stack completo:', error.stack);
-    
+    console.error('❌ Error completo:', error);
+    console.error('📌 Stack:', error.stack);
     res.status(500).json({ 
       error: 'Error del servidor',
       details: process.env.NODE_ENV === 'development' ? error.message : 'Contacte al administrador'
