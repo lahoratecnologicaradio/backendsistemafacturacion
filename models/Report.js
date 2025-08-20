@@ -5,7 +5,7 @@ const { sequelize } = require('../db');
 const Invoice = sequelize.define('Invoice', {
     invoice_number: {
         type: DataTypes.INTEGER,
-        unique: true,
+        primaryKey: true, // 👈 ESTA es la PK real de invoices
         allowNull: false
     },
     date_time: {
@@ -30,6 +30,11 @@ const Invoice = sequelize.define('Invoice', {
 
 // Modelo Productsale
 const Productsale = sequelize.define('Productsale', {
+    id: {
+        type: DataTypes.INTEGER,
+        primaryKey: true, // 👈 ESTA es la PK real de productsales
+        autoIncrement: true
+    },
     invoice_number: {
         type: DataTypes.INTEGER,
         allowNull: false,
