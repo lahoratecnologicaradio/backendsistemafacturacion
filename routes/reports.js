@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { validationResult } = require('express-validator');
 const { Op } = require('sequelize');
+const { sequelize } = require('../db');
 const { Invoice, Productsale } = require('../models/Report');
 
 // ROUTE-1: Get products by invoice number - GET "/api/reports/fetchproductswithinvoicenumber/:invoice_number"

@@ -23,8 +23,8 @@ module.exports = { sequelize, connectToMySQL };*/
 const { Sequelize } = require('sequelize');
 
 // Obtener la URL de la base de datos desde variables de entorno
-const databaseUrl = process.env.DATABASE_URL || 'mysql://root:root@localhost:3306/pos_db';
-//const databaseUrl = 'mysql://root:MbRUwDvixSbsoRicbzfwcqbDNcjhbDzm@shortline.proxy.rlwy.net:52910/railway';
+//const databaseUrl = process.env.DATABASE_URL || 'mysql://root:root@localhost:3306/pos_db';
+const databaseUrl = 'mysql://root:MbRUwDvixSbsoRicbzfwcqbDNcjhbDzm@shortline.proxy.rlwy.net:52910/railway';
 
 // Configuración de conexión a MySQL para producción
 const sequelize = new Sequelize(databaseUrl, {
