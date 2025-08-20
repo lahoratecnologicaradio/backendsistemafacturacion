@@ -28,23 +28,45 @@ router.get('/salesreport', async (req, res) => {
     try {
         const { from, to } = req.query;
 
-        if (!from || !to) {
-            return res.status(400).json({ error: "Both 'from' and 'to' parameters are required" });
-        }
+        let whereCondition = {}; // Condición vacía para traer todo
 
-        const startDate = new Date(from);
-        const endDate = new Date(to);
+        // Si existen AMBOS parámetros from y to, aplicar filtro por fecha
+        if (from && to) {
+            const startDate = new Date(from);
+            const endDate = new Date(to);
 
-        if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
-            return res.status(400).json({ error: "Invalid date format" });
+            if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+                return res.status(400).json({ error: "Invalid date format" });
+            }
+
+            whereCondition = {
+                date_time: {
+                    [Op.between]: [
+                        startDate, // Fecha inicial (ej: 2024-08-01 00:00:00)
+                        new Date(endDate.getTime() + 24 * 60 * 60 * 1000 - 1) // Fecha final + 23:59:59
+                    ]
+                }
+            };
+        } 
+        // Si solo uno de los dos parámetros está presente, es un error
+        else if (from || to) {
+            return res.status(400).json({ 
+                error: "Both 'from' and 'to' parameters are required, or omit both to get all reports" 
+            });
         }
 
         const reports = await Invoice.findAll({
-            where: {
-                date_time: {
-                    [Op.between]: [startDate, endDate]
-                }
-            }
+            attributes: [
+                'invoice_number', 
+                'date_time', 
+                'customer_name', 
+                'total', 
+                'cash', 
+                'change'
+            ],
+            where: whereCondition, // Aplica condición o vacía para traer todo
+            order: [['date_time', 'DESC']], // Ordenar por fecha descendente
+            raw: true
         });
 
         res.json(reports);
