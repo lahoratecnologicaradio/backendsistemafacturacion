@@ -69,6 +69,16 @@ const Product = sequelize.define('Product', {
   },
   category: {
     type: DataTypes.STRING
+  },
+  // NUEVO CAMPO PARA LA IMAGEN
+  image: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    validate: {
+      isUrl: {
+        msg: 'La imagen debe ser una URL válida'
+      }
+    }
   }
 }, {
   tableName: 'products',
@@ -77,13 +87,17 @@ const Product = sequelize.define('Product', {
   indexes: [
     {
       unique: true,
-      fields: ['product_name', 'brand_name'] // Índice compuesto único
+      fields: ['product_name', 'brand_name']
     },
     {
-      fields: ['category'] // Índice por categoría (corregido)
+      fields: ['category']
     },
     {
-      fields: ['barcode'] // Ya que es unique, conviene tenerlo como índice
+      fields: ['barcode']
+    },
+    // Nuevo índice para búsquedas por imagen
+    {
+      fields: ['image']
     }
   ]
 });
