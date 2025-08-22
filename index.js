@@ -54,6 +54,7 @@ const Customer = require('./models/Customer');
 const Product = require('./models/Product');
 const Supplier = require('./models/Supplier');
 const { Invoice, Productsale } = require('./models/Report');
+const { User } = require('./models/User');
 
 // Inicializar Express
 const app = express();
@@ -74,6 +75,7 @@ app.use('/api/customers', require('./routes/customers'));
 app.use('/api/suppliers', require('./routes/suppliers'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/sales', require('./routes/sales'));
+app.use('/api/auth', require('./routes/auth'));
 
 // Ruta de salud para verificar que el servidor está vivo
 app.get('/health', (req, res) => {
