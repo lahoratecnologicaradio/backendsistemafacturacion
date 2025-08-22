@@ -27,97 +27,114 @@ const authenticateToken = (req, res, next) => {
 
 // ROUTE-1: Login de usuario
 router.post('/login', async (req, res) => {
-  const transaction = await sequelize.transaction();
+    console.log('🔍 INICIANDO LOGIN - Request body:', req.body);
+    
+    const transaction = await sequelize.transaction();
+    
+    try {
+      const { userid, pwd, version } = req.body;
+      console.log('📨 Datos recibidos:', { userid, pwd: '***', version });
   
-  try {
-    const { userid, pwd, version } = req.body;
-
-    // Validar campos requeridos
-    if (!userid || !pwd) {
-      await transaction.rollback();
-      return res.status(400).json({ 
-        success: false,
-        error: 'Usuario y contraseña son requeridos' 
-      });
-    }
-
-    // Buscar usuario en la base de datos
-    const user = await User.findOne({
-      where: { 
-        userid: userid,
-        status: 'active'
-      },
-      transaction
-    });
-
-    if (!user) {
-      await transaction.rollback();
-      return res.status(401).json({ 
-        success: false,
-        error: 'Usuario no encontrado o inactivo' 
-      });
-    }
-
-    // Verificar contraseña (asumiendo que está hasheada con bcrypt)
-    const isPasswordValid = await bcrypt.compare(pwd, user.password);
-    
-    if (!isPasswordValid) {
-      await transaction.rollback();
-      return res.status(401).json({ 
-        success: false,
-        error: 'Contraseña incorrecta' 
-      });
-    }
-
-    // Actualizar último login
-    await user.update({ 
-      last_login: new Date() 
-    }, { transaction });
-
-    // Generar token JWT
-    const token = jwt.sign(
-      { 
-        id: user.id, 
-        userid: user.userid,
-        name: user.name,
-        department: user.department,
-        role: user.role 
-      },
-      process.env.JWT_SECRET || 'your-secret-key',
-      { expiresIn: '24h' }
-    );
-
-    await transaction.commit();
-
-    // Respuesta exitosa (formato que espera tu frontend)
-    res.json({
-      success: true,
-      message: `${user.name}|${user.department}`,
-      token: token,
-      user: {
-        id: user.id,
-        userid: user.userid,
-        name: user.name,
-        department: user.department,
-        role: user.role
+      // Validar campos requeridos
+      if (!userid || !pwd) {
+        console.log('❌ Faltan campos requeridos');
+        await transaction.rollback();
+        return res.status(400).json({ 
+          success: false,
+          error: 'Usuario y contraseña son requeridos' 
+        });
       }
-    });
-
-  } catch (error) {
-    if (transaction.finished !== 'commit') {
-      await transaction.rollback();
+  
+      // Buscar usuario en la base de datos
+      console.log('🔎 Buscando usuario en BD:', userid);
+      const user = await User.findOne({
+        where: { 
+          userid: userid,
+          status: 'active'
+        },
+        transaction
+      });
+  
+      console.log('👤 Usuario encontrado:', user ? 'SÍ' : 'NO');
+      if (!user) {
+        console.log('❌ Usuario no encontrado o inactivo');
+        await transaction.rollback();
+        return res.status(401).json({ 
+          success: false,
+          error: 'Usuario no encontrado o inactivo' 
+        });
+      }
+  
+      console.log('🔐 Comparando contraseña...');
+      console.log('📝 Contraseña recibida (primeros 5 chars):', pwd.substring(0, 5) + '...');
+      console.log('🗃️ Hash almacenado:', user.password);
+      
+      // Verificar contraseña (asumiendo que está hasheada con bcrypt)
+      const isPasswordValid = await bcrypt.compare(pwd, user.password);
+      console.log('✅ ¿Contraseña válida?', isPasswordValid);
+      
+      if (!isPasswordValid) {
+        console.log('❌ Contraseña incorrecta');
+        await transaction.rollback();
+        return res.status(401).json({ 
+          success: false,
+          error: 'Contraseña incorrecta' 
+        });
+      }
+  
+      // Actualizar último login
+      console.log('🕐 Actualizando último login...');
+      await user.update({ 
+        last_login: new Date() 
+      }, { transaction });
+  
+      // Generar token JWT
+      console.log('🔨 Generando token JWT...');
+      const token = jwt.sign(
+        { 
+          id: user.id, 
+          userid: user.userid,
+          name: user.name,
+          department: user.department,
+          role: user.role 
+        },
+        process.env.JWT_SECRET || 'your-secret-key',
+        { expiresIn: '24h' }
+      );
+  
+      await transaction.commit();
+      console.log('✅ LOGIN EXITOSO para usuario:', user.userid);
+  
+      // Respuesta exitosa (formato que espera tu frontend)
+      res.json({
+        success: true,
+        message: `${user.name}|${user.department}`,
+        token: token,
+        user: {
+          id: user.id,
+          userid: user.userid,
+          name: user.name,
+          department: user.department,
+          role: user.role
+        }
+      });
+  
+    } catch (error) {
+      console.error('💥 ERROR CRÍTICO en login:', error.message);
+      console.error('📌 STACK:', error.stack);
+      
+      if (transaction.finished !== 'commit') {
+        await transaction.rollback();
+        console.log('🔄 Transacción revertida');
+      }
+      
+      res.status(500).json({ 
+        success: false,
+        error: 'Error interno del servidor',
+        details: process.env.NODE_ENV === 'development' ? error.message : null
+      });
     }
-    
-    console.error('❌ ERROR en login:', error.message);
-    console.error('📌 STACK:', error.stack);
-    
-    res.status(500).json({ 
-      success: false,
-      error: 'Error interno del servidor',
-      details: process.env.NODE_ENV === 'development' ? error.message : null
-    });
-  }
-});
+  });
 
 // ROUTE-2: Registro de nuevo usuario
 router.post('/register', async (req, res) => {
