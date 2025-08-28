@@ -70,7 +70,7 @@ const Product = sequelize.define('Product', {
     validate: {
       min: {
         args: [0],
-        //msg: 'La cantidad no puede ser negativa'
+        msg: 'La cantidad no puede ser negativa'
       }
     }
   },
