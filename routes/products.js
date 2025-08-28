@@ -146,7 +146,7 @@ router.put('/updateproduct/:id', upload.single('image'), async (req, res) => {
       supplier_name, 
       o_price, 
       s_price, 
-      tax,           // NUEVO CAMPO TAX
+      tax,
       qty, 
       unit_of_measure,
       rec_date, 
@@ -161,19 +161,19 @@ router.put('/updateproduct/:id', upload.single('image'), async (req, res) => {
     }
 
     const updateData = {};
-    if (product_name) updateData.product_name = product_name;
-    if (brand_name) updateData.brand_name = brand_name;
-    if (supplier_name) updateData.supplier_name = supplier_name;
-    if (description) updateData.description = description;
-    if (o_price) updateData.o_price = parseFloat(o_price);
-    if (s_price) updateData.s_price = parseFloat(s_price);
-    if (tax !== undefined) updateData.tax = parseFloat(tax);  // NUEVO CAMPO
-    if (qty) updateData.qty = parseInt(qty);
-    if (unit_of_measure) updateData.unit_of_measure = unit_of_measure;
-    if (rec_date) updateData.rec_date = rec_date;
-    if (exp_date) updateData.exp_date = exp_date;
-    if (barcode) updateData.barcode = barcode;
-    if (category) updateData.category = category;
+    if (product_name !== undefined) updateData.product_name = product_name;
+    if (brand_name !== undefined) updateData.brand_name = brand_name;
+    if (supplier_name !== undefined) updateData.supplier_name = supplier_name;
+    if (description !== undefined) updateData.description = description;
+    if (o_price !== undefined) updateData.o_price = parseFloat(o_price);
+    if (s_price !== undefined) updateData.s_price = parseFloat(s_price);
+    if (tax !== undefined) updateData.tax = parseFloat(tax);
+    if (qty !== undefined) updateData.qty = parseInt(qty);
+    if (unit_of_measure !== undefined) updateData.unit_of_measure = unit_of_measure;
+    if (rec_date !== undefined) updateData.rec_date = rec_date;
+    if (exp_date !== undefined) updateData.exp_date = exp_date;
+    if (barcode !== undefined) updateData.barcode = barcode;
+    if (category !== undefined) updateData.category = category;
 
     if (req.file) {
       if (product.image) {
@@ -193,10 +193,13 @@ router.put('/updateproduct/:id', upload.single('image'), async (req, res) => {
 
     await product.update(updateData);
 
+    // Obtener el producto actualizado para devolverlo
+    const updatedProduct = await Product.findByPk(req.params.id);
+
     res.json({
       success: true,
       message: 'Producto actualizado exitosamente',
-      product: product
+      product: updatedProduct
     });
 
   } catch (error) {
