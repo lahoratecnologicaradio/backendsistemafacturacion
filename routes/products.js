@@ -308,6 +308,7 @@ router.get('/images/:filename', (req, res) => {
     res.status(404).json({ 
       success: false,
       message: "Imagen no encontrada" 
+      //message: "Imagen no encontrada" 
     });
   }
 });
