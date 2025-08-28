@@ -171,7 +171,7 @@ router.put('/updateproduct/:id', upload.single('image'), async (req, res) => {
           parsedId: productId,
           parsedType: typeof productId,
           availableIds: allProducts.map(p => p.id),
-          availableProducts: availableIds
+          //availableProducts: availableIds
         }
       });
     }
