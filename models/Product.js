@@ -47,6 +47,23 @@ const Product = sequelize.define('Product', {
       }
     }
   },
+  // NUEVO CAMPO: IMPUESTO
+  tax: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: false,
+    defaultValue: 0.00,
+    validate: {
+      min: {
+        args: [0],
+        msg: 'El impuesto no puede ser negativo'
+      },
+      max: {
+        args: [100],
+        msg: 'El impuesto no puede ser mayor a 100%'
+      }
+    },
+    comment: 'Porcentaje de impuesto aplicable al producto (ej: 16.00, 21.00)'
+  },
   qty: {
     type: DataTypes.INTEGER,
     defaultValue: 0,
@@ -57,7 +74,7 @@ const Product = sequelize.define('Product', {
       }
     }
   },
-  // NUEVO CAMPO: UNIDAD DE MEDIDA
+  // CAMPO: UNIDAD DE MEDIDA
   unit_of_measure: {
     type: DataTypes.STRING(50),
     allowNull: false,
@@ -110,15 +127,20 @@ const Product = sequelize.define('Product', {
     {
       fields: ['barcode']
     },
-    // Nuevo índice para búsquedas por imagen
+    // Índice para búsquedas por imagen
     {
       fields: ['image']
     },
-    // Nuevo índice para búsquedas por unidad de medida
+    // Índice para búsquedas por unidad de medida
     {
       fields: ['unit_of_measure']
+    },
+    // NUEVO ÍNDICE: Para búsquedas por rango de impuestos
+    {
+      fields: ['tax']
     }
-  ]
+  ],
+  comment: 'Tabla de productos con información de inventario e impuestos'
 });
 
 module.exports = Product;
