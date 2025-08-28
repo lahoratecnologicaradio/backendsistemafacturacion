@@ -139,6 +139,45 @@ router.post('/addproduct', upload.single('image'), async (req, res) => {
 // ROUTE-3: Update a Product
 router.put('/updateproduct/:id', upload.single('image'), async (req, res) => {
   try {
+    // CONVERTIR EL ID A NÚMERO - SOLUCIÓN AL PROBLEMA
+    const productId = parseInt(req.params.id);
+    
+    // Debug: verificar el ID recibido y parseado
+    console.log('🔍 ID recibido:', req.params.id, 'Tipo:', typeof req.params.id);
+    console.log('🔢 ID parseado:', productId, 'Tipo:', typeof productId);
+    
+    // Buscar el producto con el ID convertido a número
+    let product = await Product.findByPk(productId);
+    
+    // Si no se encuentra, intentar buscar como string (por si acaso)
+    if (!product) {
+      console.log('⚠️  No encontrado como número, intentando como string...');
+      product = await Product.findByPk(req.params.id); // Intentar como string
+    }
+    
+    if (!product) {
+      // Debug: obtener todos los productos para verificar los IDs existentes
+      const allProducts = await Product.findAll();
+      const availableIds = allProducts.map(p => ({ id: p.id, type: typeof p.id, name: p.product_name }));
+      
+      console.log('❌ Producto no encontrado. IDs disponibles:', availableIds);
+      
+      return res.status(404).json({ 
+        success: false,
+        message: "Product not found",
+        debug: {
+          receivedId: req.params.id,
+          receivedType: typeof req.params.id,
+          parsedId: productId,
+          parsedType: typeof productId,
+          availableIds: allProducts.map(p => p.id),
+          availableProducts: availableIds
+        }
+      });
+    }
+
+    console.log('✅ Producto encontrado:', product.product_name);
+    
     const { 
       product_name, 
       brand_name, 
@@ -155,12 +194,6 @@ router.put('/updateproduct/:id', upload.single('image'), async (req, res) => {
       category 
     } = req.body;
 
-    let product = await Product.findByPk(req.params.id);
-    if (!product) {
-      //return res.status(404).json({ message: "Product not found" });
-      return res.status(404).json({ message: req.params.id });
-    }
-
     const updateData = {};
     if (product_name !== undefined) updateData.product_name = product_name;
     if (brand_name !== undefined) updateData.brand_name = brand_name;
@@ -176,13 +209,17 @@ router.put('/updateproduct/:id', upload.single('image'), async (req, res) => {
     if (barcode !== undefined) updateData.barcode = barcode;
     if (category !== undefined) updateData.category = category;
 
+    console.log('📝 Datos a actualizar:', updateData);
+
     if (req.file) {
+      console.log('🖼️  Imagen recibida:', req.file.filename);
       if (product.image) {
         const filename = product.image.split('/').pop();
         const oldImagePath = path.join('/imagenes', filename);
         if (fs.existsSync(oldImagePath)) {
           try {
             fs.unlinkSync(oldImagePath);
+            console.log('🗑️  Imagen anterior eliminada:', filename);
           } catch (deleteError) {
             console.error('Error al eliminar imagen anterior:', deleteError);
           }
@@ -193,9 +230,16 @@ router.put('/updateproduct/:id', upload.single('image'), async (req, res) => {
     }
 
     await product.update(updateData);
+    console.log('✅ Producto actualizado en la base de datos');
 
     // Obtener el producto actualizado para devolverlo
-    const updatedProduct = await Product.findByPk(req.params.id);
+    const updatedProduct = await Product.findByPk(productId);
+    
+    // Si no encuentra el producto actualizado, intentar con el ID string
+    if (!updatedProduct) {
+      console.log('⚠️  No se pudo obtener producto actualizado con número, intentando con string...');
+      updatedProduct = await Product.findByPk(req.params.id);
+    }
 
     res.json({
       success: true,
@@ -204,11 +248,13 @@ router.put('/updateproduct/:id', upload.single('image'), async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error al actualizar producto:', error);
+    console.error('❌ Error al actualizar producto:', error);
+    console.error('🔍 Stack trace:', error.stack);
     
     if (req.file && fs.existsSync(req.file.path)) {
       try {
         fs.unlinkSync(req.file.path);
+        console.log('🗑️  Imagen temporal eliminada debido al error');
       } catch (deleteError) {
         console.error('Error al eliminar nueva imagen:', deleteError);
       }
@@ -217,7 +263,8 @@ router.put('/updateproduct/:id', upload.single('image'), async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Internal Server Error",
-      error: process.env.NODE_ENV === 'development' ? error.message : null
+      error: process.env.NODE_ENV === 'development' ? error.message : null,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
