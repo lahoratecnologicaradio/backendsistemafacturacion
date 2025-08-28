@@ -65,7 +65,20 @@ router.get('/fetchallproducts', async (req, res) => {
 // ROUTE-2: Add a new Product with image
 router.post('/addproduct', upload.single('image'), async (req, res) => {
   try {
-    const { product_name, brand_name, description, supplier_name, o_price, s_price, qty, rec_date, exp_date, barcode, category } = req.body;
+    const { 
+      product_name, 
+      brand_name, 
+      description, 
+      supplier_name, 
+      o_price, 
+      s_price, 
+      qty, 
+      unit_of_measure,  // NUEVO CAMPO
+      rec_date, 
+      exp_date, 
+      barcode, 
+      category 
+    } = req.body;
     
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -83,6 +96,7 @@ router.post('/addproduct', upload.single('image'), async (req, res) => {
       o_price: parseFloat(o_price),
       s_price: parseFloat(s_price),
       qty: parseInt(qty),
+      unit_of_measure: unit_of_measure || 'unidad',  // NUEVO CAMPO con valor por defecto
       rec_date,
       exp_date,
       barcode,
@@ -123,7 +137,20 @@ router.post('/addproduct', upload.single('image'), async (req, res) => {
 // ROUTE-3: Update a Product
 router.put('/updateproduct/:id', upload.single('image'), async (req, res) => {
   try {
-    const { product_name, brand_name, description, supplier_name, o_price, s_price, qty, rec_date, exp_date, barcode, category } = req.body;
+    const { 
+      product_name, 
+      brand_name, 
+      description, 
+      supplier_name, 
+      o_price, 
+      s_price, 
+      qty, 
+      unit_of_measure,  // NUEVO CAMPO
+      rec_date, 
+      exp_date, 
+      barcode, 
+      category 
+    } = req.body;
 
     let product = await Product.findByPk(req.params.id);
     if (!product) {
@@ -138,6 +165,7 @@ router.put('/updateproduct/:id', upload.single('image'), async (req, res) => {
     if (o_price) updateData.o_price = parseFloat(o_price);
     if (s_price) updateData.s_price = parseFloat(s_price);
     if (qty) updateData.qty = parseInt(qty);
+    if (unit_of_measure) updateData.unit_of_measure = unit_of_measure;  // NUEVO CAMPO
     if (rec_date) updateData.rec_date = rec_date;
     if (exp_date) updateData.exp_date = exp_date;
     if (barcode) updateData.barcode = barcode;

@@ -57,6 +57,21 @@ const Product = sequelize.define('Product', {
       }
     }
   },
+  // NUEVO CAMPO: UNIDAD DE MEDIDA
+  unit_of_measure: {
+    type: DataTypes.STRING(50),
+    allowNull: false,
+    defaultValue: 'unidad',
+    validate: {
+      notEmpty: {
+        msg: 'La unidad de medida es requerida'
+      },
+      isIn: {
+        args: [['unidad', 'libra', 'kilo', 'gramo', 'porción', 'paquete', 'caja', 'litro', 'mililitro', 'metro']],
+        msg: 'La unidad de medida no es válida'
+      }
+    }
+  },
   rec_date: {
     type: DataTypes.DATEONLY
   },
@@ -70,7 +85,7 @@ const Product = sequelize.define('Product', {
   category: {
     type: DataTypes.STRING
   },
-  // NUEVO CAMPO PARA LA IMAGEN
+  // CAMPO PARA LA IMAGEN
   image: {
     type: DataTypes.STRING,
     allowNull: true,
@@ -98,6 +113,10 @@ const Product = sequelize.define('Product', {
     // Nuevo índice para búsquedas por imagen
     {
       fields: ['image']
+    },
+    // Nuevo índice para búsquedas por unidad de medida
+    {
+      fields: ['unit_of_measure']
     }
   ]
 });
