@@ -72,8 +72,9 @@ router.post('/addproduct', upload.single('image'), async (req, res) => {
       supplier_name, 
       o_price, 
       s_price, 
+      tax,           // NUEVO CAMPO TAX
       qty, 
-      unit_of_measure,  // NUEVO CAMPO
+      unit_of_measure,
       rec_date, 
       exp_date, 
       barcode, 
@@ -95,8 +96,9 @@ router.post('/addproduct', upload.single('image'), async (req, res) => {
       supplier_name,
       o_price: parseFloat(o_price),
       s_price: parseFloat(s_price),
+      tax: parseFloat(tax) || 0.00,  // NUEVO CAMPO con valor por defecto
       qty: parseInt(qty),
-      unit_of_measure: unit_of_measure || 'unidad',  // NUEVO CAMPO con valor por defecto
+      unit_of_measure: unit_of_measure || 'unidad',
       rec_date,
       exp_date,
       barcode,
@@ -144,8 +146,9 @@ router.put('/updateproduct/:id', upload.single('image'), async (req, res) => {
       supplier_name, 
       o_price, 
       s_price, 
+      tax,           // NUEVO CAMPO TAX
       qty, 
-      unit_of_measure,  // NUEVO CAMPO
+      unit_of_measure,
       rec_date, 
       exp_date, 
       barcode, 
@@ -164,8 +167,9 @@ router.put('/updateproduct/:id', upload.single('image'), async (req, res) => {
     if (description) updateData.description = description;
     if (o_price) updateData.o_price = parseFloat(o_price);
     if (s_price) updateData.s_price = parseFloat(s_price);
+    if (tax !== undefined) updateData.tax = parseFloat(tax);  // NUEVO CAMPO
     if (qty) updateData.qty = parseInt(qty);
-    if (unit_of_measure) updateData.unit_of_measure = unit_of_measure;  // NUEVO CAMPO
+    if (unit_of_measure) updateData.unit_of_measure = unit_of_measure;
     if (rec_date) updateData.rec_date = rec_date;
     if (exp_date) updateData.exp_date = exp_date;
     if (barcode) updateData.barcode = barcode;
@@ -308,7 +312,6 @@ router.get('/images/:filename', (req, res) => {
     res.status(404).json({ 
       success: false,
       message: "Imagen no encontrada" 
-      //message: "Imagen no encontrada" 
     });
   }
 });
