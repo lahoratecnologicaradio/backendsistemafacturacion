@@ -591,4 +591,97 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
   }
 });
 
+// 6. Endpoint para registrar resultado de visita por datos (vendedor, cliente, fecha)
+router.post('/registrar-resultado-por-datos', async (req, res) => {
+  try {
+    const { 
+      vendedor_id, 
+      customer_id, 
+      fecha_visita, 
+      interes_cliente, 
+      probabilidad_venta, 
+      productos_interes, 
+      pedido_realizado, 
+      monto_potencial, 
+      observaciones, 
+      proxima_visita,
+      duracion_visita,
+      hora_realizacion
+    } = req.body;
+
+    // Validar datos requeridos
+    if (!vendedor_id || !customer_id || !fecha_visita) {
+      return res.status(400).json({
+        success: false,
+        message: 'vendedor_id, customer_id y fecha_visita son requeridos'
+      });
+    }
+
+    // Buscar la visita programada
+    const visita = await VisitaProgramada.findOne({
+      where: {
+        vendedor_id: vendedor_id,
+        customer_id: customer_id,
+        fecha_programada: fecha_visita,
+        estado: 'pendiente' // Solo buscar visitas pendientes
+      }
+    });
+
+    if (!visita) {
+      return res.status(404).json({
+        success: false,
+        message: 'No se encontró una visita pendiente para estos datos'
+      });
+    }
+
+    // Actualizar TODOS los campos de la visita programada
+    const updateData = {
+      estado: 'realizada',
+      fecha_realizacion: new Date(),
+      updated_at: new Date()
+    };
+
+    // Campos opcionales que pueden venir del request
+    if (duracion_visita) updateData.duracion_visita = duracion_visita;
+    if (hora_realizacion) updateData.hora_realizacion = hora_realizacion;
+    if (observaciones) {
+      // Combinar observaciones existentes con las nuevas
+      updateData.observaciones = visita.observaciones 
+        ? `${visita.observaciones} | ${observaciones}`
+        : observaciones;
+    }
+
+    await visita.update(updateData);
+
+    // Registrar resultado
+    const resultado = await ResultadoVisita.create({
+      visita_id: visita.id,
+      interes_cliente: interes_cliente || 'alto',
+      probabilidad_venta: probabilidad_venta || 'alta',
+      productos_interes: productos_interes || 'Venta realizada',
+      pedido_realizado: pedido_realizado !== undefined ? pedido_realizado : true,
+      monto_potencial: monto_potencial || 0,
+      observaciones: observaciones || 'Factura generada',
+      proxima_visita: proxima_visita || null
+    });
+
+    res.json({
+      success: true,
+      message: 'Visita actualizada y resultado registrado exitosamente',
+      data: {
+        visita: visita,
+        resultado: resultado
+      }
+    });
+
+  } catch (error) {
+    console.error('Error al registrar resultado por datos:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+      error: process.env.NODE_ENV === 'development' ? error.message : null
+    });
+  }
+});
+
 module.exports = router;
