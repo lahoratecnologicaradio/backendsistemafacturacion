@@ -617,13 +617,98 @@ router.post('/registrar-resultado-por-datos', async (req, res) => {
       });
     }
 
+    // Validar tipos de datos
+    if (isNaN(Number(vendedor_id)) || isNaN(Number(customer_id))) {
+      return res.status(400).json({
+        success: false,
+        message: 'vendedor_id y customer_id deben ser números válidos'
+      });
+    }
+
+    // Validar formato de fecha
+    const fechaRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!fechaRegex.test(fecha_visita)) {
+      return res.status(400).json({
+        success: false,
+        message: 'fecha_visita debe tener formato YYYY-MM-DD'
+      });
+    }
+
+    // Convertir y validar duración
+    let duracionMinutos = null;
+    if (duracion_visita !== undefined && duracion_visita !== null) {
+      if (typeof duracion_visita === 'string') {
+        if (duracion_visita.includes(':')) {
+          // Formato HH:MM:SS
+          const timeParts = duracion_visita.split(':');
+          if (timeParts.length !== 3) {
+            return res.status(400).json({
+              success: false,
+              message: 'duracion_visita en formato HH:MM:SS debe tener 3 componentes'
+            });
+          }
+          const [hours, minutes, seconds] = timeParts.map(Number);
+          if (isNaN(hours) || isNaN(minutes) || isNaN(seconds)) {
+            return res.status(400).json({
+              success: false,
+              message: 'duracion_visita contiene valores no numéricos'
+            });
+          }
+          duracionMinutos = hours * 60 + minutes;
+        } else {
+          // String numérico
+          duracionMinutos = parseInt(duracion_visita, 10);
+          if (isNaN(duracionMinutos)) {
+            return res.status(400).json({
+              success: false,
+              message: 'duracion_visita debe ser un número válido'
+            });
+          }
+        }
+      } else if (typeof duracion_visita === 'number') {
+        duracionMinutos = duracion_visita;
+      } else {
+        return res.status(400).json({
+          success: false,
+          message: 'duracion_visita debe ser un número o string en formato HH:MM:SS'
+        });
+      }
+
+      // Validar rango de duración (1 minuto a 24 horas)
+      if (duracionMinutos < 1 || duracionMinutos > 1440) {
+        return res.status(400).json({
+          success: false,
+          message: 'duracion_visita debe estar entre 1 y 1440 minutos (24 horas)'
+        });
+      }
+    }
+
+    // Validar hora_realizacion si se proporciona
+    if (hora_realizacion && !/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]$/.test(hora_realizacion)) {
+      return res.status(400).json({
+        success: false,
+        message: 'hora_realizacion debe tener formato HH:MM:SS'
+      });
+    }
+
+    // Validar monto_potencial si se proporciona
+    if (monto_potencial !== undefined && monto_potencial !== null) {
+      const monto = parseFloat(monto_potencial);
+      if (isNaN(monto) || monto < 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'monto_potencial debe ser un número positivo'
+        });
+      }
+    }
+
     // Buscar la visita programada
     const visita = await VisitaProgramada.findOne({
       where: {
-        vendedor_id: vendedor_id,
-        customer_id: customer_id,
+        vendedor_id: Number(vendedor_id),
+        customer_id: Number(customer_id),
         fecha_programada: fecha_visita,
-        estado: 'pendiente' // Solo buscar visitas pendientes
+        estado: 'pendiente'
       }
     });
 
@@ -634,33 +719,44 @@ router.post('/registrar-resultado-por-datos', async (req, res) => {
       });
     }
 
-    // Actualizar TODOS los campos de la visita programada
+    // Preparar datos de actualización
     const updateData = {
       estado: 'realizada',
       fecha_realizacion: new Date(),
       updated_at: new Date()
     };
 
-    // Campos opcionales que pueden venir del request
-    if (duracion_visita) updateData.duracion_visita = duracion_visita;
+    // Campos opcionales
+    if (duracionMinutos !== null) updateData.duracion_visita = duracionMinutos;
     if (hora_realizacion) updateData.hora_realizacion = hora_realizacion;
     if (observaciones) {
-      // Combinar observaciones existentes con las nuevas
       updateData.observaciones = visita.observaciones 
         ? `${visita.observaciones} | ${observaciones}`
         : observaciones;
     }
 
+    // Actualizar visita
     await visita.update(updateData);
+
+    // Validar campos para el resultado
+    const camposRequeridosResultado = ['interes_cliente', 'probabilidad_venta'];
+    for (const campo of camposRequeridosResultado) {
+      if (!req.body[campo]) {
+        return res.status(400).json({
+          success: false,
+          message: `${campo} es requerido para registrar el resultado`
+        });
+      }
+    }
 
     // Registrar resultado
     const resultado = await ResultadoVisita.create({
       visita_id: visita.id,
-      interes_cliente: interes_cliente || 'alto',
-      probabilidad_venta: probabilidad_venta || 'alta',
+      interes_cliente: interes_cliente,
+      probabilidad_venta: probabilidad_venta,
       productos_interes: productos_interes || 'Venta realizada',
-      pedido_realizado: pedido_realizado !== undefined ? pedido_realizado : true,
-      monto_potencial: monto_potencial || 0,
+      pedido_realizado: pedido_realizado !== undefined ? Boolean(pedido_realizado) : true,
+      monto_potencial: monto_potencial ? parseFloat(monto_potencial) : 0,
       observaciones: observaciones || 'Factura generada',
       proxima_visita: proxima_visita || null
     });
@@ -676,9 +772,39 @@ router.post('/registrar-resultado-por-datos', async (req, res) => {
 
   } catch (error) {
     console.error('Error al registrar resultado por datos:', error);
+    
+    // Manejar errores específicos de la base de datos
+    if (error.name === 'SequelizeValidationError') {
+      const errores = error.errors.map(err => ({
+        campo: err.path,
+        mensaje: err.message
+      }));
+      
+      return res.status(400).json({
+        success: false,
+        message: 'Error de validación en los datos',
+        errores: errores
+      });
+    }
+
+    if (error.name === 'SequelizeUniqueConstraintError') {
+      return res.status(409).json({
+        success: false,
+        message: 'Ya existe un registro con estos datos'
+      });
+    }
+
+    if (error.name === 'SequelizeForeignKeyConstraintError') {
+      return res.status(400).json({
+        success: false,
+        message: 'Error de referencia: vendedor_id o customer_id no existen'
+      });
+    }
+
+    // Error general del servidor
     res.status(500).json({
       success: false,
-      message: 'Error interno del servidor',
+      message: 'Error interno del servidor al procesar la solicitud',
       error: process.env.NODE_ENV === 'development' ? error.message : null
     });
   }
