@@ -37,6 +37,27 @@ const ResultadoVisita = sequelize.define('ResultadoVisita', {
     type: DataTypes.DECIMAL(10, 2),
     defaultValue: 0
   },
+  // ✅ NUEVOS CAMPOS A AGREGAR:
+  tipo_pago: {
+    type: DataTypes.ENUM('contado', 'credito', 'mixto'),
+    defaultValue: 'contado',
+    comment: 'Tipo de pago realizado en la visita'
+  },
+  monto_contado: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0,
+    comment: 'Monto pagado al contado (efectivo)'
+  },
+  monto_credito: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0,
+    comment: 'Monto a crédito'
+  },
+  monto_total: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0,
+    comment: 'Monto total (contado + crédito)'
+  },
   observaciones: {
     type: DataTypes.TEXT,
     allowNull: true
