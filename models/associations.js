@@ -41,6 +41,19 @@ function defineAssociations() {
     as: 'visitas'
   });
 
+  // NUEVAS ASOCIACIONES: Relación entre Vendedor y Customer
+  // Un Vendedor tiene muchos Customers
+  Vendedor.hasMany(Customer, {
+    foreignKey: 'vendedor_id',
+    as: 'clientes'
+  });
+
+  // Un Customer pertenece a un Vendedor
+  Customer.belongsTo(Vendedor, {
+    foreignKey: 'vendedor_id',
+    as: 'vendedor'
+  });
+
   console.log('Asociaciones definidas correctamente');
 }
 

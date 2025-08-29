@@ -1,3 +1,4 @@
+// models/Vendedor.js
 const { DataTypes } = require('sequelize');
 const { sequelize } = require('../db');
 const User = require('./User'); // Asumiendo que tienes un modelo User
@@ -53,7 +54,25 @@ const Vendedor = sequelize.define('Vendedor', {
   underscored: true
 });
 
-// Relaciones
-Vendedor.belongsTo(User, { foreignKey: 'user_id', as: 'usuario' });
+// Definir las asociaciones
+Vendedor.associate = function(models) {
+  // Relación con User
+  Vendedor.belongsTo(models.User, { 
+    foreignKey: 'user_id', 
+    as: 'usuario' 
+  });
+  
+  // Relación con Customer (nueva)
+  Vendedor.hasMany(models.Customer, {
+    foreignKey: 'vendedor_id',
+    as: 'clientes'
+  });
+};
+
+// Relaciones básicas (para mantener compatibilidad)
+Vendedor.belongsTo(User, { 
+  foreignKey: 'user_id', 
+  as: 'usuario' 
+});
 
 module.exports = Vendedor;

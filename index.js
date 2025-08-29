@@ -215,6 +215,7 @@ app.use((req, res, next) => {
 });
 
 // Función para definir asociaciones
+// En tu index.js, modifica la función defineAssociations:
 const defineAssociations = () => {
   try {
     console.log('🔗 Definiendo asociaciones entre modelos...');
@@ -246,10 +247,20 @@ const defineAssociations = () => {
       as: 'visitas'
     });
 
+    Vendedor.hasMany(Customer, {
+      foreignKey: 'vendedor_id',
+      as: 'clientes'
+    });
+
     // 3. Asociaciones para Customer
     Customer.hasMany(VisitaProgramada, {
       foreignKey: 'customer_id',
       as: 'visitas'
+    });
+
+    Customer.belongsTo(Vendedor, {
+      foreignKey: 'vendedor_id',
+      as: 'vendedor'
     });
 
     console.log('✅ Asociaciones definidas correctamente');

@@ -29,11 +29,29 @@ const Customer = sequelize.define('Customer', {
   },
   due_date: {
     type: DataTypes.DATE
+  },
+  vendedor_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    references: {
+      model: 'vendedores', // Nombre de la tabla de vendedores
+      key: 'id'
+    },
+    onUpdate: 'CASCADE',
+    onDelete: 'SET NULL'
   }
 }, {
   tableName: 'customers',
-  timestamps: true,    // Esto es suficiente
-  underscored: false   // camelCase por defecto
+  timestamps: true,
+  underscored: false
 });
+
+// Si necesitas definir asociaciones (opcional pero recomendado)
+Customer.associate = function(models) {
+  Customer.belongsTo(models.Vendedor, {
+    foreignKey: 'vendedor_id',
+    as: 'vendedor'
+  });
+};
 
 module.exports = Customer;

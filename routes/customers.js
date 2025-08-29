@@ -4,7 +4,6 @@ const { validationResult } = require('express-validator');
 const { sequelize } = require('../db');
 const Customer = require('../models/Customer');
 
-
 // ROUTE-1: Obtener todos los clientes
 router.get('/fetchallcustomers', async (req, res) => {
   try {
@@ -25,22 +24,59 @@ router.get('/fetchallcustomers', async (req, res) => {
     res.json(customers);
 
   } catch (error) {
-    // ¡IMPORTANTE! Siempre muestra el error real en consola
     console.error('❌ ERROR REAL:', error.message);
     console.error('📌 STACK:', error.stack);
     console.error('🔍 CÓDIGO:', error.code);
     console.error('📋 ERRNO:', error.errno);
     
-    // Devuelve el error REAL en la respuesta también
     res.status(500).json({ 
       error: 'Internal Server Error',
-      details: error.message, // ← Esto muestra el error real
+      details: error.message,
       code: error.code
     });
   }
 });
 
-// ROUTE-2: Agregar nuevo cliente
+// ROUTE-2: Obtener clientes por ID del vendedor
+router.get('/vendedor/:vendedor_id', async (req, res) => {
+  try {
+    const { vendedor_id } = req.params;
+    
+    console.log(`🔍 Buscando clientes del vendedor ID: ${vendedor_id}`);
+    
+    if (!vendedor_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'ID del vendedor es requerido'
+      });
+    }
+
+    const clientes = await Customer.findAll({
+      where: { 
+        vendedor_id: vendedor_id
+      },
+      order: [['full_name', 'ASC']]
+    });
+
+    console.log(`✅ ${clientes.length} clientes encontrados para el vendedor ${vendedor_id}`);
+    
+    res.json({
+      success: true,
+      count: clientes.length,
+      data: clientes
+    });
+
+  } catch (error) {
+    console.error('❌ Error al buscar clientes por vendedor:', error.message);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+      error: process.env.NODE_ENV === 'development' ? error.message : null
+    });
+  }
+});
+
+// ROUTE-3: Agregar nuevo cliente
 router.post('/addcustomer', async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -59,7 +95,7 @@ router.post('/addcustomer', async (req, res) => {
   }
 });
 
-// ROUTE-3: Actualizar cliente
+// ROUTE-4: Actualizar cliente
 router.put('/updatecustomer/:id', async (req, res) => {
   try {
     const customer = await Customer.findByPk(req.params.id);
@@ -78,7 +114,7 @@ router.put('/updatecustomer/:id', async (req, res) => {
   }
 });
 
-// ROUTE-4: Eliminar cliente
+// ROUTE-5: Eliminar cliente
 router.delete('/deletecustomer/:id', async (req, res) => {
   try {
     const customer = await Customer.findByPk(req.params.id);
