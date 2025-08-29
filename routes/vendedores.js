@@ -189,4 +189,45 @@ router.put('/update/:id', async (req, res) => {
   }
 });
 
+// 6. Endpoint para buscar vendedor por user_id
+router.get('/user/:user_id', async (req, res) => {
+  try {
+    const { user_id } = req.params;
+
+    if (!user_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'user_id es requerido'
+      });
+    }
+
+    const vendedor = await Vendedor.findOne({
+      where: { 
+        user_id: user_id,
+        activo: true 
+      }
+    });
+
+    if (!vendedor) {
+      return res.status(404).json({
+        success: false,
+        message: 'Vendedor no encontrado para este user_id'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: vendedor
+    });
+
+  } catch (error) {
+    console.error('Error al buscar vendedor por user_id:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+      error: process.env.NODE_ENV === 'development' ? error.message : null
+    });
+  }
+});
+
 module.exports = router;
