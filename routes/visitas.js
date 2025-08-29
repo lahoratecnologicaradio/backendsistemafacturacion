@@ -163,7 +163,7 @@ router.get('/realizadas/:vendedorId/:fecha', async (req, res) => {
         },
         {
           model: ResultadoVisita,
-          as: 'resultados',
+          as: 'resultado',
           required: false
         },
         {
@@ -460,7 +460,7 @@ router.get('/historial/:vendedorId', async (req, res) => {
         },
         {
           model: ResultadoVisita,
-          as: 'resultados',
+          as: 'resultado',
           required: false
         }
       ],
@@ -476,6 +476,113 @@ router.get('/historial/:vendedorId', async (req, res) => {
 
   } catch (error) {
     console.error('Error al obtener historial:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+      error: process.env.NODE_ENV === 'development' ? error.message : null
+    });
+  }
+});
+
+// Endpoint para obtener cobros de un vendedor en un día específico
+router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
+  try {
+    const { vendedorId, fecha } = req.params;
+
+    // Verificar si el vendedor existe
+    const vendedor = await Vendedor.findByPk(vendedorId);
+    if (!vendedor) {
+      return res.status(404).json({
+        success: false,
+        message: 'Vendedor no encontrado'
+      });
+    }
+
+    // Obtener todas las visitas realizadas por el vendedor en la fecha especificada
+    const visitasRealizadas = await VisitaProgramada.findAll({
+      where: {
+        vendedor_id: vendedorId,
+        fecha_programada: fecha,
+        estado: 'realizada'
+      },
+      include: [
+        {
+          model: Customer,
+          as: 'cliente',
+          attributes: ['id', 'full_name', 'c_number', 'address']
+        },
+        {
+          model: ResultadoVisita,
+          as: 'resultado',
+          required: true,
+          where: {
+            pedido_realizado: true,
+            [Op.or]: [
+              { monto_contado: { [Op.gt]: 0 } },
+              { monto_credito: { [Op.gt]: 0 } }
+            ]
+          }
+        }
+      ],
+      order: [['hora_programada', 'ASC']]
+    });
+
+    // Calcular totales
+    let totalContado = 0;
+    let totalCredito = 0;
+    let totalGeneral = 0;
+    
+    // Array para almacenar detalles de cobros
+    const detallesCobros = [];
+
+    visitasRealizadas.forEach(visita => {
+      if (visita.resultado) { // ✅ Cambiado: resultado es objeto, no array
+        const resultado = visita.resultado;
+        const montoContado = parseFloat(resultado.monto_contado) || 0;
+        const montoCredito = parseFloat(resultado.monto_credito) || 0;
+        const montoTotal = parseFloat(resultado.monto_total) || (montoContado + montoCredito);
+        
+        totalContado += montoContado;
+        totalCredito += montoCredito;
+        totalGeneral += montoTotal;
+        
+        detallesCobros.push({
+          visita_id: visita.id,
+          cliente_id: visita.cliente.id,
+          cliente_nombre: visita.cliente.full_name,
+          cliente_numero: visita.cliente.c_number,
+          cliente_direccion: visita.cliente.address,
+          monto_contado: montoContado,
+          monto_credito: montoCredito,
+          monto_total: montoTotal,
+          tipo_pago: resultado.tipo_pago,
+          observaciones: resultado.observaciones,
+          hora_visita: visita.hora_programada,
+          fecha_visita: visita.fecha_programada
+        });
+      }
+    });
+
+    res.json({
+      success: true,
+      fecha: fecha,
+      vendedor: {
+        id: vendedor.id,
+        nombre: vendedor.nombre,
+        email: vendedor.email
+      },
+      resumen_cobros: {
+        total_contado: totalContado.toFixed(2),
+        total_credito: totalCredito.toFixed(2),
+        total_general: totalGeneral.toFixed(2),
+        cantidad_ventas: detallesCobros.length,
+        promedio_venta: detallesCobros.length > 0 ? (totalGeneral / detallesCobros.length).toFixed(2) : 0
+      },
+      detalles_cobros: detallesCobros
+    });
+
+  } catch (error) {
+    console.error('Error al obtener cobros del vendedor:', error);
     res.status(500).json({
       success: false,
       message: 'Error interno del servidor',
