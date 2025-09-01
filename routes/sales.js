@@ -220,6 +220,7 @@ router.get('/getbyinvoice/:invoice_number', async (req, res) => {
 });
 
 // ROUTE-7: Obtener estadísticas de ventas por vendedor
+// ROUTE-7: Obtener estadísticas de ventas por vendedor (VERSIÓN CORREGIDA)
 router.post('/vendedor-stats', async (req, res) => {
   try {
     const { startDate, endDate } = req.body;
@@ -230,7 +231,7 @@ router.post('/vendedor-stats', async (req, res) => {
     
     if (startDate && endDate) {
       whereCondition = 'WHERE i.date_time BETWEEN ? AND ?';
-      queryParams = [startDate, endDate + ' 23:59:59']; // Incluir todo el día final
+      queryParams = [startDate, endDate + ' 23:59:59'];
     } else if (startDate) {
       whereCondition = 'WHERE i.date_time >= ?';
       queryParams = [startDate];
@@ -239,18 +240,20 @@ router.post('/vendedor-stats', async (req, res) => {
       queryParams = [endDate + ' 23:59:59'];
     }
 
-    // Consulta SQL para obtener estadísticas de ventas por vendedor
+    // CONSULTA CORREGIDA - Usando los nombres de columnas correctos
     const query = `
       SELECT 
-        c.vendedor_id,
-        COUNT(i.id) as cantidad_ventas,
+        i.vendedor_id,
+        COUNT(i.invoice_number) as cantidad_ventas,
         SUM(i.total) as total_ventas
       FROM invoices i
-      INNER JOIN customers c ON i.customer_name = c.nombre
       ${whereCondition}
-      GROUP BY c.vendedor_id
+      GROUP BY i.vendedor_id
       ORDER BY total_ventas DESC
     `;
+
+    console.log('Ejecutando consulta:', query);
+    console.log('Con parámetros:', queryParams);
 
     // Ejecutar la consulta
     const [results] = await sequelize.query(query, {
@@ -259,11 +262,11 @@ router.post('/vendedor-stats', async (req, res) => {
     });
 
     // Formatear la respuesta
-    const stats = Array.isArray(results) ? results : [results];
+    const stats = Array.isArray(results) ? results : (results ? [results] : []);
     
     res.json({
       success: true,
-      data: stats.filter(item => item.vendedor_id !== null) // Filtrar vendedores nulos
+      data: stats.filter(item => item && item.vendedor_id !== null)
     });
 
   } catch (error) {
