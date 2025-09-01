@@ -810,4 +810,123 @@ router.post('/registrar-resultado-por-datos', async (req, res) => {
   }
 });
 
+// =====================
+// NUEVOS ENDPOINTS
+// =====================
+
+// GET /api/visitas/list
+// Lista visitas (por defecto HOY) con filtros:
+//   ?estado=pendiente|realizada|all  (default: all -> pendiente+realizada)
+//   ?from=YYYY-MM-DD                 (default: hoy)
+//   ?to=YYYY-MM-DD                   (default: hoy)
+//   ?vendedor_id=NUMBER              (opcional)
+//   ?customer_id=NUMBER              (opcional)
+//
+// Devuelve array plano con include de vendedor y cliente.
+// Además, añade campos calculados: days_left, is_urgent (<=3 días), is_past.
+router.get('/list', async (req, res) => {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+
+    const {
+      estado = 'all',
+      from = today,
+      to = today,
+      vendedor_id,
+      customer_id
+    } = req.query;
+
+    const where = {
+      fecha_programada: {
+        [Op.between]: [from, to]
+      }
+    };
+
+    // estado: all -> pendiente + realizada
+    if (estado !== 'all') {
+      where.estado = estado;
+    } else {
+      where.estado = { [Op.in]: ['pendiente', 'realizada'] };
+    }
+
+    if (vendedor_id) where.vendedor_id = Number(vendedor_id);
+    if (customer_id) where.customer_id = Number(customer_id);
+
+    const visitas = await VisitaProgramada.findAll({
+      where,
+      include: [
+        {
+          model: Customer,
+          as: 'cliente',
+          attributes: ['id', 'full_name', 'address', 'c_number']
+        },
+        {
+          model: Vendedor,
+          as: 'vendedor',
+          attributes: ['id', 'nombre', 'email']
+        },
+        {
+          model: ResultadoVisita,
+          as: 'resultado',
+          required: false
+        }
+      ],
+      order: [
+        ['fecha_programada', 'ASC'],
+        ['hora_programada', 'ASC'],
+        ['prioridad', 'DESC']
+      ]
+    });
+
+    // Anexar flags útiles para el front
+    const todayDate = new Date(today);
+    const withFlags = visitas.map(v => {
+      const d = new Date(v.fecha_programada + 'T00:00:00Z');
+      const diffMs = d - todayDate; // futuro => positivo
+      const days_left = Math.round(diffMs / (1000 * 60 * 60 * 24));
+      const is_past = days_left < 0 && v.estado === 'pendiente';
+      const is_urgent = v.estado === 'pendiente' && days_left >= 0 && days_left <= 3;
+      return {
+        ...v.toJSON(),
+        days_left,
+        is_urgent,
+        is_past
+      };
+    });
+
+    res.json({
+      success: true,
+      filters: { estado, from, to, vendedor_id: vendedor_id ? Number(vendedor_id) : null, customer_id: customer_id ? Number(customer_id) : null },
+      count: withFlags.length,
+      data: withFlags
+    });
+
+  } catch (error) {
+    console.error('Error en GET /visitas/list:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+      error: process.env.NODE_ENV === 'development' ? error.message : null
+    });
+  }
+});
+
+// DELETE /api/visitas/:id
+// Elimina una visita (próxima o pasada). Útil para limpiar o reprogramar.
+router.delete('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const visita = await VisitaProgramada.findByPk(id);
+    if (!visita) {
+      return res.status(404).json({ success: false, message: 'Visita no encontrada' });
+    }
+    await visita.destroy();
+    res.json({ success: true, message: 'Visita eliminada' });
+  } catch (error) {
+    console.error('Error al eliminar visita:', error);
+    res.status(500).json({ success: false, message: 'Error interno del servidor' });
+  }
+});
+
+
 module.exports = router;
