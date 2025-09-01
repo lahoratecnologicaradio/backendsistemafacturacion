@@ -219,4 +219,63 @@ router.get('/getbyinvoice/:invoice_number', async (req, res) => {
   }
 });
 
+// ROUTE-7: Obtener estadísticas de ventas por vendedor
+router.post('/vendedor-stats', async (req, res) => {
+  try {
+    const { startDate, endDate } = req.body;
+    
+    // Construir la condición WHERE basada en las fechas proporcionadas
+    let whereCondition = '';
+    let queryParams = [];
+    
+    if (startDate && endDate) {
+      whereCondition = 'WHERE i.date_time BETWEEN ? AND ?';
+      queryParams = [startDate, endDate + ' 23:59:59']; // Incluir todo el día final
+    } else if (startDate) {
+      whereCondition = 'WHERE i.date_time >= ?';
+      queryParams = [startDate];
+    } else if (endDate) {
+      whereCondition = 'WHERE i.date_time <= ?';
+      queryParams = [endDate + ' 23:59:59'];
+    }
+
+    // Consulta SQL para obtener estadísticas de ventas por vendedor
+    const query = `
+      SELECT 
+        c.vendedor_id,
+        COUNT(i.id) as cantidad_ventas,
+        SUM(i.total) as total_ventas
+      FROM invoices i
+      INNER JOIN customers c ON i.customer_name = c.nombre
+      ${whereCondition}
+      GROUP BY c.vendedor_id
+      ORDER BY total_ventas DESC
+    `;
+
+    // Ejecutar la consulta
+    const [results] = await sequelize.query(query, {
+      replacements: queryParams,
+      type: sequelize.QueryTypes.SELECT
+    });
+
+    // Formatear la respuesta
+    const stats = Array.isArray(results) ? results : [results];
+    
+    res.json({
+      success: true,
+      data: stats.filter(item => item.vendedor_id !== null) // Filtrar vendedores nulos
+    });
+
+  } catch (error) {
+    console.error('❌ ERROR en vendedor-stats:', error.message);
+    console.error('📌 STACK:', error.stack);
+    
+    res.status(500).json({ 
+      success: false,
+      error: 'Error al obtener estadísticas de ventas',
+      details: process.env.NODE_ENV === 'development' ? error.message : null
+    });
+  }
+});
+
 module.exports = router;
