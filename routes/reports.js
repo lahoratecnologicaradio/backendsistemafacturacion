@@ -16,7 +16,7 @@ router.get('/fetchproductswithinvoicenumber/:invoice_number', async (req, res) =
 
         res.json(products);
     } catch (error) {
-        console.error('Error fetching products:', error);
+        console.error('Error fetching products:', error);/*tex*/
         res.status(500).json({ 
             error: 'Internal Server Error',
             details: process.env.NODE_ENV !== 'production' ? error.message : null
