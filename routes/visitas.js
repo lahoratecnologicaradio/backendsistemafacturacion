@@ -11,7 +11,7 @@ const Customer = require('../models/Customer');
  *  Helpers de Fechas    *
  * ===================== */
 
-// YYYY-MM-DD con fecha local del servidor (evita desfases por UTC)
+// YYYY-MM-DD (fecha local del servidor, no UTC)
 function todayYMDLocal() {
   const d = new Date();
   const y = d.getFullYear();
@@ -32,6 +32,7 @@ function normalizeToYMD(input) {
   return null;
 }
 
+// Include común (cliente, vendedor, resultado)
 const COMMON_INCLUDE = [
   { model: Customer, as: 'cliente', attributes: ['id','full_name','address','c_number'] },
   { model: Vendedor, as: 'vendedor', attributes: ['id','nombre','email'] },
@@ -183,7 +184,7 @@ router.get('/resumen-dia/:vendedorId/:fecha', async (req, res) => {
 
 /* ========================================================= *
  * 5) Registrar resultado (por visita_id o por datos)        *
- *    (Versión consolidada: NO duplicada)                    *
+ *    (consolidado; evita duplicados de ruta)                *
  * ========================================================= */
 router.post('/registrar-resultado', async (req, res) => {
   try {
@@ -221,7 +222,7 @@ router.post('/registrar-resultado', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Se requiere visita_id o (vendedor_id y customer_id)' });
     }
 
-    // Actualizar visita como realizada si corresponde
+    // Actualizar visita como realizada (y anexar campos opcionales)
     await visita.update({
       estado: 'realizada',
       fecha_realizacion: new Date(),
@@ -350,21 +351,71 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
  * 8) Listados generales (/hoy, /dia/:fecha, /list)          *
  * ========================================================= */
 
-// HOY: pendientes + realizadas de TODOS
+// HOY: pendientes + realizadas de TODOS (DATEONLY exacto)
+// HOY: pendientes + realizadas de TODOS (con diagnóstico)
 router.get('/hoy', async (_req, res) => {
   try {
     const today = todayYMDLocal();
-    const visitas = await VisitaProgramada.findAll({
-      where: { fecha_programada: today, estado: { [Op.in]: ['pendiente','realizada'] } },
+    console.log('[VISITAS /hoy] hoy(local)=', today);
+
+    // 1) Consulta normal (con estado)
+    const withEstado = await VisitaProgramada.findAll({
+      where: { 
+        fecha_programada: today, 
+        estado: { [Op.in]: ['pendiente', 'realizada'] } 
+      },
       include: COMMON_INCLUDE,
       order: [['hora_programada','ASC'], ['prioridad','DESC']]
     });
-    res.json({ success: true, fecha: today, count: visitas.length, data: visitas });
+
+    // Log por estado
+    const byEstado = withEstado.reduce((acc, v) => {
+      acc[v.estado] = (acc[v.estado] || 0) + 1;
+      return acc;
+    }, {});
+    console.log('[VISITAS /hoy] con estado -> encontrados:', withEstado.length, 'por estado:', byEstado);
+
+    // 2) Si no encontró nada, probar SIN estado (puede haber valores inesperados)
+    let data = withEstado;
+    let fallbackUsed = false;
+    if (withEstado.length === 0) {
+      const sinEstado = await VisitaProgramada.findAll({
+        where: { fecha_programada: today }, // sin filtro de estado
+        include: COMMON_INCLUDE,
+        order: [['hora_programada','ASC'], ['prioridad','DESC']]
+      });
+      const estadosDetectados = [...new Set(sinEstado.map(v => v.estado))];
+      console.log('[VISITAS /hoy] sin estado -> encontrados:', sinEstado.length, 'estados:', estadosDetectados);
+      data = sinEstado;
+      fallbackUsed = true;
+    }
+
+    // 3) Si aún sigue en 0, devolvemos además un top 5 "raw" de la tabla para comprobar conexión/BD
+    let sample = [];
+    if (data.length === 0) {
+      sample = await VisitaProgramada.findAll({
+        order: [['id','DESC']],
+        limit: 5
+      });
+      console.log('[VISITAS /hoy] sample últimas 5 filas:', sample.map(r => ({
+        id: r.id, fecha_programada: r.fecha_programada, estado: r.estado, vendedor_id: r.vendedor_id, customer_id: r.customer_id
+      })));
+    }
+
+    return res.json({
+      success: true,
+      fecha: today,
+      count: data.length,
+      used_fallback_no_estado: fallbackUsed,
+      data,
+      sample_when_empty: sample // array vacío si sí hubo resultados
+    });
   } catch (e) {
     console.error('GET /visitas/hoy', e);
     res.status(500).json({ success: false, message: 'Error interno del servidor' });
   }
 });
+
 
 // DIA: pendientes + realizadas de TODOS en fecha exacta
 router.get('/dia/:fecha', async (req, res) => {
@@ -377,6 +428,7 @@ router.get('/dia/:fecha', async (req, res) => {
       include: COMMON_INCLUDE,
       order: [['hora_programada','ASC'], ['prioridad','DESC']]
     });
+
     res.json({ success: true, fecha: ymd, count: visitas.length, data: visitas });
   } catch (e) {
     console.error('GET /visitas/dia/:fecha', e);
