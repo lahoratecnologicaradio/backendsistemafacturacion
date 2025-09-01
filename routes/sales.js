@@ -220,7 +220,6 @@ router.get('/getbyinvoice/:invoice_number', async (req, res) => {
 });
 
 // ROUTE-7: Obtener estadísticas de ventas por vendedor
-// ROUTE-7: Obtener estadísticas de ventas por vendedor (VERSIÓN CORREGIDA)
 router.post('/vendedor-stats', async (req, res) => {
   try {
     const { startDate, endDate } = req.body;
@@ -230,43 +229,44 @@ router.post('/vendedor-stats', async (req, res) => {
     let queryParams = [];
     
     if (startDate && endDate) {
-      whereCondition = 'WHERE i.date_time BETWEEN ? AND ?';
+      whereCondition = 'WHERE date_time BETWEEN ? AND ?';
       queryParams = [startDate, endDate + ' 23:59:59'];
     } else if (startDate) {
-      whereCondition = 'WHERE i.date_time >= ?';
+      whereCondition = 'WHERE date_time >= ?';
       queryParams = [startDate];
     } else if (endDate) {
-      whereCondition = 'WHERE i.date_time <= ?';
+      whereCondition = 'WHERE date_time <= ?';
       queryParams = [endDate + ' 23:59:59'];
     }
 
-    // CONSULTA CORREGIDA - Usando los nombres de columnas correctos
     const query = `
       SELECT 
-        i.vendedor_id,
-        COUNT(i.invoice_number) as cantidad_ventas,
-        SUM(i.total) as total_ventas
-      FROM invoices i
+        COALESCE(vendedor_id, 0) as vendedor_id,
+        COUNT(invoice_number) as cantidad_ventas,
+        SUM(total) as total_ventas
+      FROM invoices
       ${whereCondition}
-      GROUP BY i.vendedor_id
+      GROUP BY COALESCE(vendedor_id, 0)
       ORDER BY total_ventas DESC
     `;
 
     console.log('Ejecutando consulta:', query);
     console.log('Con parámetros:', queryParams);
 
-    // Ejecutar la consulta
-    const [results] = await sequelize.query(query, {
+    // Ejecutar la consulta - CORRECCIÓN IMPORTANTE
+    const results = await sequelize.query(query, {
       replacements: queryParams,
       type: sequelize.QueryTypes.SELECT
     });
 
-    // Formatear la respuesta
-    const stats = Array.isArray(results) ? results : (results ? [results] : []);
+    // Asegurarnos de que siempre sea un array
+    const stats = Array.isArray(results) ? results : [];
+    
+    console.log('Resultados obtenidos:', stats.length, 'vendedores');
     
     res.json({
       success: true,
-      data: stats.filter(item => item && item.vendedor_id !== null)
+      data: stats
     });
 
   } catch (error) {
@@ -280,5 +280,4 @@ router.post('/vendedor-stats', async (req, res) => {
     });
   }
 });
-
 module.exports = router;
