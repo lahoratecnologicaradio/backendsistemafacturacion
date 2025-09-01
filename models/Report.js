@@ -5,7 +5,7 @@ const { sequelize } = require('../db');
 const Invoice = sequelize.define('Invoice', {
     invoice_number: {
         type: DataTypes.INTEGER,
-        primaryKey: true, // 👈 ESTA es la PK real de invoices
+        primaryKey: true,
         allowNull: false
     },
     date_time: {
@@ -13,6 +13,14 @@ const Invoice = sequelize.define('Invoice', {
     },
     customer_name: {
         type: DataTypes.STRING
+    },
+    customer_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true // Puede ser null si no se especifica cliente
+    },
+    vendedor_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true // Puede ser null si no se especifica vendedor
     },
     total: {
         type: DataTypes.FLOAT
@@ -32,7 +40,7 @@ const Invoice = sequelize.define('Invoice', {
 const Productsale = sequelize.define('Productsale', {
     id: {
         type: DataTypes.INTEGER,
-        primaryKey: true, // 👈 ESTA es la PK real de productsales
+        primaryKey: true,
         autoIncrement: true
     },
     invoice_number: {
