@@ -16,7 +16,7 @@ router.get('/fetchproductswithinvoicenumber/:invoice_number', async (req, res) =
 
         res.json(products);
     } catch (error) {
-        console.error('Error fetching products:', error);/*tex*/
+        console.error('Error fetching products:', error);
         res.status(500).json({ 
             error: 'Internal Server Error',
             details: process.env.NODE_ENV !== 'production' ? error.message : null
@@ -29,7 +29,7 @@ router.get('/salesreport', async (req, res) => {
     try {
         const { from, to } = req.query;
 
-        let whereCondition = {}; // Condición vacía para traer todo
+        let whereCondition = {};
 
         // Si existen AMBOS parámetros from y to, aplicar filtro por fecha
         if (from && to) {
@@ -43,8 +43,8 @@ router.get('/salesreport', async (req, res) => {
             whereCondition = {
                 date_time: {
                     [Op.between]: [
-                        startDate, // Fecha inicial (ej: 2024-08-01 00:00:00)
-                        new Date(endDate.getTime() + 24 * 60 * 60 * 1000 - 1) // Fecha final + 23:59:59
+                        startDate,
+                        new Date(endDate.getTime() + 24 * 60 * 60 * 1000 - 1)
                     ]
                 }
             };
@@ -61,12 +61,14 @@ router.get('/salesreport', async (req, res) => {
                 'invoice_number', 
                 'date_time', 
                 'customer_name', 
+                'customer_id', // Incluir customer_id
+                'vendedor_id', // Incluir vendedor_id
                 'total', 
                 'cash', 
                 'change'
             ],
-            where: whereCondition, // Aplica condición o vacía para traer todo
-            order: [['date_time', 'DESC']], // Ordenar por fecha descendente
+            where: whereCondition,
+            order: [['date_time', 'DESC']],
             raw: true
         });
 
@@ -84,7 +86,17 @@ router.get('/salesreport', async (req, res) => {
 router.post('/addreport', async (req, res) => {
     const transaction = await sequelize.transaction();
     try {
-        const { invoice_number, customer_name, date_time, products, total, cash, change } = req.body;
+        const { 
+            invoice_number, 
+            customer_name, 
+            customer_id,      // Nuevo campo
+            vendedor_id,      // Nuevo campo
+            date_time, 
+            products, 
+            total, 
+            cash, 
+            change 
+        } = req.body;
 
         if (!Array.isArray(products) || products.length === 0) {
             return res.status(400).json({ error: "Products should be a non-empty array" });
@@ -94,6 +106,8 @@ router.post('/addreport', async (req, res) => {
         const invoice = await Invoice.create({
             invoice_number,
             customer_name,
+            customer_id,      // Incluir customer_id
+            vendedor_id,      // Incluir vendedor_id
             date_time,
             total,
             cash,
