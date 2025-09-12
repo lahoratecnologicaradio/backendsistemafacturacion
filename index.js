@@ -276,6 +276,8 @@ app.use('/api/suppliers', require('./routes/suppliers'));
 app.use('/api/reports', require('./routes/reports'));
 app.use('/api/sales', require('./routes/sales'));
 app.use('/api/auth', require('./routes/auth'));
+app.use('/api/sync', require('./routes/sync'));
+
 
 // Agregar las nuevas rutas de vendedores y visitas
 app.use('/api/vendedores', vendedoresRoutes);
