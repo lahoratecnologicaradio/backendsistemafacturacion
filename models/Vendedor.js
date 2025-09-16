@@ -26,16 +26,6 @@ const Vendedor = sequelize.define('Vendedor', {
       }
     }
   },
-  email: {
-    type: DataTypes.STRING(100),
-    allowNull: false,
-    unique: true,
-    validate: {
-      isEmail: {
-        msg: 'El email debe ser válido'
-      }
-    }
-  },
   telefono: {
     type: DataTypes.STRING(20),
     allowNull: true
