@@ -152,22 +152,21 @@ router.put('/update/:id', async (req, res) => {
       });
     }
 
-    const { nombre, email, telefono, zona, activo } = req.body;
+    const { nombre, telefono, zona, activo } = req.body;
 
-    // Verificar si el email ya existe (excluyendo el actual)
-    if (email && email !== vendedor.email) {
-      const existingVendedor = await Vendedor.findOne({ where: { email } });
+    // Verificar si el telefono ya existe (excluyendo el actual)
+    if (telefono && telefono !== vendedor.email) {
+      const existingVendedor = await Vendedor.findOne({ where: { telefono } });
       if (existingVendedor) {
         return res.status(400).json({
           success: false,
-          message: 'El email ya está registrado por otro vendedor'
+          message: 'El telefono ya está registrado por otro vendedor'
         });
       }
     }
 
     await vendedor.update({
       nombre: nombre || vendedor.nombre,
-      email: email || vendedor.email,
       telefono: telefono !== undefined ? telefono : vendedor.telefono,
       zona: zona !== undefined ? zona : vendedor.zona,
       activo: activo !== undefined ? activo : vendedor.activo
