@@ -41,6 +41,7 @@ const Vendedor = sequelize.define('Vendedor', {
 }, {
   tableName: 'vendedores',
   timestamps: true,
+  underscored: true,
   underscored: true
 });
 
