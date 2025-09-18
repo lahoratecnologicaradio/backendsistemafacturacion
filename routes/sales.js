@@ -4,7 +4,7 @@ const router = express.Router();
 const { validationResult } = require('express-validator');
 const { sequelize } = require('../db');
 const Invoice = require('../models/Invoice');
-const { Op, QueryTypes } = require('sequelize');
+const { QueryTypes } = require('sequelize');
 
 // ---------- LISTAR TODAS ----------
 router.get('/fetchallsales', async (req, res) => {
@@ -18,16 +18,18 @@ router.get('/fetchallsales', async (req, res) => {
   }
 });
 
-// ---------- NUEVA: Facturas por vendedor ----------
-router.get('/invoices/seller/:sellerId', async (req, res) => {
+// ---------- FACTURAS POR VENDEDOR (usa vendedor_id) ----------
+router.get('/invoices/seller/:vendedorId', async (req, res) => {
   try {
-    const { sellerId } = req.params;
+    const { vendedorId } = req.params;
 
     const rows = await Invoice.findAll({
-      where: { seller_id: sellerId },
+      where: { vendedor_id: vendedorId },
       attributes: {
         include: [
+          // total absoluto por si guardas negativos para crédito
           [sequelize.literal('ABS(total)'), 'abs_total'],
+          // balance solo aplica a crédito
           [
             sequelize.literal(
               "CASE WHEN LOWER(COALESCE(payment_method,''))='credit' " +
@@ -72,7 +74,7 @@ router.post('/addsale', async (req, res) => {
       total,
       cash,
       change,
-      seller_id,       // opcional
+      vendedor_id,     // 👈 ahora este
       payment_method   // opcional: 'cash' | 'credit'
     } = req.body;
 
@@ -84,6 +86,8 @@ router.post('/addsale', async (req, res) => {
       return res.status(400).json({ error: 'Faltan campos requeridos' });
     }
 
+    const method = (payment_method || 'cash').toLowerCase();
+
     const invoice = await Invoice.create({
       invoice_number,
       date_time,
@@ -91,9 +95,9 @@ router.post('/addsale', async (req, res) => {
       total,
       cash,
       change,
-      seller_id: seller_id ?? null,
-      payment_method: payment_method || 'cash',
-      paid_amount:  (payment_method || 'cash').toLowerCase() === 'cash' ? Math.abs(total) : 0
+      vendedor_id: vendedor_id ?? null,
+      payment_method: method,
+      paid_amount:  method === 'cash' ? Math.abs(total) : 0
     }, { transaction: t });
 
     await t.commit();
@@ -132,7 +136,7 @@ router.put('/updatesale/:invoice_number', async (req, res) => {
 
     const {
       date_time, customer_name, total, cash, change,
-      seller_id, payment_method, paid_amount
+      vendedor_id, payment_method, paid_amount
     } = req.body;
 
     if (
@@ -145,7 +149,7 @@ router.put('/updatesale/:invoice_number', async (req, res) => {
 
     await invoice.update({
       date_time, customer_name, total, cash, change,
-      seller_id: seller_id ?? invoice.seller_id,
+      vendedor_id: vendedor_id ?? invoice.vendedor_id,
       payment_method: payment_method ?? invoice.payment_method,
       paid_amount: paid_amount ?? invoice.paid_amount
     }, { transaction: t });
@@ -178,7 +182,7 @@ router.delete('/deletesale/:invoice_number', async (req, res) => {
   }
 });
 
-// ---------- NUEVA: Registrar pago (abono) a crédito ----------
+// ---------- REGISTRAR PAGO (ABONO) A CRÉDITO ----------
 router.post('/invoices/pay/:invoice_number', async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -230,7 +234,7 @@ router.post('/invoices/pay/:invoice_number', async (req, res) => {
         paid_amount: newPaid,
         balance: Math.max(absTotal - newPaid, 0),
         date_time: invoice.date_time,
-        seller_id: invoice.seller_id
+        vendedor_id: invoice.vendedor_id
       }
     });
   } catch (error) {
@@ -240,7 +244,7 @@ router.post('/invoices/pay/:invoice_number', async (req, res) => {
   }
 });
 
-// ---------- (opcional) Estadísticas: tal cual la tuya ----------
+// ---------- ESTADÍSTICAS POR VENDEDOR (usa vendedor_id) ----------
 router.post('/vendedor-stats', async (req, res) => {
   try {
     const { startDate, endDate } = req.body;
@@ -258,12 +262,12 @@ router.post('/vendedor-stats', async (req, res) => {
     }
 
     const q = `
-      SELECT COALESCE(seller_id, 0) AS seller_id,
+      SELECT COALESCE(vendedor_id, 0) AS vendedor_id,
              COUNT(invoice_number) AS cantidad_ventas,
              SUM(total) AS total_ventas
       FROM invoices
       ${where}
-      GROUP BY COALESCE(seller_id, 0)
+      GROUP BY COALESCE(vendedor_id, 0)
       ORDER BY total_ventas DESC
     `;
     const data = await sequelize.query(q, { replacements: params, type: QueryTypes.SELECT });
@@ -275,4 +279,3 @@ router.post('/vendedor-stats', async (req, res) => {
 });
 
 module.exports = router;
-
