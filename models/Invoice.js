@@ -29,9 +29,9 @@ const Invoice = sequelize.define('Invoice', {
     allowNull: false
   },
 
-  // 🔽 NUEVOS (opcionales) para vendedor y pagos a crédito
-  seller_id: {
-    type: DataTypes.INTEGER,     // o STRING si lo manejas así
+  // 🔽 NUEVOS
+  vendedor_id: {
+    type: DataTypes.INTEGER,
     allowNull: true
   },
   payment_method: {
@@ -50,4 +50,3 @@ const Invoice = sequelize.define('Invoice', {
 });
 
 module.exports = Invoice;
-
