@@ -6,30 +6,26 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "preinstall": "yarn cache clean || true",
-    "postinstall": "node -e \"require('fs').accessSync(require.resolve('debug/src/common'))\" || (console.error('debug/src/common no existe. Instalación corrupta.'), process.exit(1))",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
+    "dotenv": "^17.2.1",
+    "express": "^4.18.2",
     "express-validator": "^7.0.1",
     "jsonwebtoken": "^9.0.2",
+    "mongoose": "^7.4.1",
     "multer": "^2.0.2",
     "mysql2": "^3.14.3",
+    "nodemon": "^3.0.1",
     "sequelize": "^6.37.7"
   },
-  "devDependencies": {
-    "nodemon": "^3.1.7"
+  "resolutions": {
+    "debug": "2.6.9"
   },
   "engines": {
-    "node": "20.x"
-  },
-  "resolutions": {
-    "debug": "4.3.6"
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
   }
 }
