@@ -1,283 +1,278 @@
+// routes/invoices.js
 const express = require('express');
 const router = express.Router();
 const { validationResult } = require('express-validator');
 const { sequelize } = require('../db');
 const Invoice = require('../models/Invoice');
+const { Op, QueryTypes } = require('sequelize');
 
-// ROUTE-1: Obtener todas las facturas/ventas
+// ---------- LISTAR TODAS ----------
 router.get('/fetchallsales', async (req, res) => {
   try {
-    console.log('🔍 Iniciando fetchallsales...');
-    
-    // Verificar conexión
     await sequelize.authenticate();
-    console.log('✅ Conexión a BD exitosa');
-
-    // Buscar todas las facturas
-    const invoices = await Invoice.findAll({
-      order: [['date_time', 'DESC']]
-    });
-    
-    console.log(`✅ ${invoices.length} facturas encontradas`);
+    const invoices = await Invoice.findAll({ order: [['date_time', 'DESC']] });
     res.json(invoices);
-
   } catch (error) {
-    console.error('❌ ERROR en fetchallsales:', error.message);
-    console.error('📌 STACK:', error.stack);
-    
-    res.status(500).json({ 
-      error: 'Internal Server Error',
-      details: error.message,
-      code: error.code
-    });
+    console.error('❌ fetchallsales:', error);
+    res.status(500).json({ error: 'Internal Server Error', details: error.message });
   }
 });
 
-// ROUTE-2: Agregar nueva factura/venta
+// ---------- NUEVA: Facturas por vendedor ----------
+router.get('/invoices/seller/:sellerId', async (req, res) => {
+  try {
+    const { sellerId } = req.params;
+
+    const rows = await Invoice.findAll({
+      where: { seller_id: sellerId },
+      attributes: {
+        include: [
+          [sequelize.literal('ABS(total)'), 'abs_total'],
+          [
+            sequelize.literal(
+              "CASE WHEN LOWER(COALESCE(payment_method,''))='credit' " +
+              "THEN GREATEST(ABS(total) - COALESCE(paid_amount,0), 0) " +
+              "ELSE 0 END"
+            ),
+            'balance'
+          ]
+        ]
+      },
+      order: [['date_time', 'DESC']],
+      raw: true
+    });
+
+    const normalized = rows.map(r => ({
+      ...r,
+      total: Number(r.abs_total ?? r.total ?? 0),
+      balance: Number(r.balance ?? 0)
+    }));
+
+    res.json({ success: true, data: normalized });
+  } catch (error) {
+    console.error('❌ invoices/seller:', error);
+    res.status(500).json({ success: false, error: 'Error al listar facturas del vendedor', details: error.message });
+  }
+});
+
+// ---------- CREAR ----------
 router.post('/addsale', async (req, res) => {
-  const transaction = await sequelize.transaction();
-  
+  const t = await sequelize.transaction();
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      await transaction.rollback();
+      await t.rollback();
       return res.status(400).json({ errors: errors.array() });
     }
-    
-    const { invoice_number, date_time, customer_name, total, cash, change } = req.body;
-    
-    // Validar datos requeridos
-    if (!invoice_number || !date_time || !customer_name || total === undefined || cash === undefined || change === undefined) {
-      await transaction.rollback();
+
+    const {
+      invoice_number,
+      date_time,
+      customer_name,
+      total,
+      cash,
+      change,
+      seller_id,       // opcional
+      payment_method   // opcional: 'cash' | 'credit'
+    } = req.body;
+
+    if (
+      invoice_number == null || !date_time || !customer_name ||
+      total == null || cash == null || change == null
+    ) {
+      await t.rollback();
       return res.status(400).json({ error: 'Faltan campos requeridos' });
     }
 
-    // Crear la factura
     const invoice = await Invoice.create({
       invoice_number,
       date_time,
       customer_name,
       total,
       cash,
-      change
-    }, { transaction });
+      change,
+      seller_id: seller_id ?? null,
+      payment_method: payment_method || 'cash',
+      paid_amount:  (payment_method || 'cash').toLowerCase() === 'cash' ? Math.abs(total) : 0
+    }, { transaction: t });
 
-    // Confirmar la transacción
-    await transaction.commit();
-
+    await t.commit();
     res.status(201).json(invoice);
-
   } catch (error) {
-    // Revertir la transacción en caso de error
-    if (transaction.finished !== 'commit') {
-      await transaction.rollback();
-    }
-    
-    console.error('❌ Error al crear factura:', error.message);
-    console.error('📌 STACK:', error.stack);
-    
-    // Manejar error de duplicado
+    if (t.finished !== 'commit') await t.rollback();
     if (error.name === 'SequelizeUniqueConstraintError') {
-      return res.status(400).json({ 
-        error: 'Número de factura duplicado',
-        details: 'El número de factura ya existe en el sistema'
-      });
+      return res.status(400).json({ error: 'Número de factura duplicado' });
     }
-    
-    res.status(500).json({ 
-      error: 'Error al crear factura',
-      details: process.env.NODE_ENV === 'development' ? error.message : null
-    });
+    console.error('❌ addsale:', error);
+    res.status(500).json({ error: 'Error al crear factura', details: error.message });
   }
 });
 
-// ROUTE-3: Obtener factura por ID
-router.get('/getsale/:id', async (req, res) => {
+// ---------- OBTENER POR invoice_number ----------
+router.get('/getsale/:invoice_number', async (req, res) => {
   try {
-    const invoice = await Invoice.findByPk(req.params.id);
-    
-    if (!invoice) {
-      return res.status(404).json({ error: 'Factura no encontrada' });
-    }
-
+    const invoice = await Invoice.findByPk(req.params.invoice_number);
+    if (!invoice) return res.status(404).json({ error: 'Factura no encontrada' });
     res.json(invoice);
   } catch (error) {
-    console.error('Error al obtener factura:', error);
-    res.status(500).json({ 
-      error: 'Error al obtener factura',
-      details: process.env.NODE_ENV === 'development' ? error.message : null
-    });
+    console.error('❌ getsale:', error);
+    res.status(500).json({ error: 'Error al obtener factura', details: error.message });
   }
 });
 
-// ROUTE-4: Actualizar factura
-router.put('/updatesale/:id', async (req, res) => {
-  const transaction = await sequelize.transaction();
-  
+// ---------- ACTUALIZAR POR invoice_number ----------
+router.put('/updatesale/:invoice_number', async (req, res) => {
+  const t = await sequelize.transaction();
   try {
-    const invoice = await Invoice.findByPk(req.params.id);
+    const invoice = await Invoice.findByPk(req.params.invoice_number);
     if (!invoice) {
-      await transaction.rollback();
+      await t.rollback();
       return res.status(404).json({ error: 'Factura no encontrada' });
     }
 
-    const { invoice_number, date_time, customer_name, total, cash, change } = req.body;
+    const {
+      date_time, customer_name, total, cash, change,
+      seller_id, payment_method, paid_amount
+    } = req.body;
 
-    // Validar datos
-    if (!invoice_number || !date_time || !customer_name || total === undefined || cash === undefined || change === undefined) {
-      await transaction.rollback();
+    if (
+      date_time == null || customer_name == null ||
+      total == null || cash == null || change == null
+    ) {
+      await t.rollback();
       return res.status(400).json({ error: 'Faltan campos requeridos' });
     }
 
-    // Actualizar datos de la factura
     await invoice.update({
-      invoice_number,
-      date_time,
-      customer_name,
-      total,
-      cash,
-      change
-    }, { transaction });
+      date_time, customer_name, total, cash, change,
+      seller_id: seller_id ?? invoice.seller_id,
+      payment_method: payment_method ?? invoice.payment_method,
+      paid_amount: paid_amount ?? invoice.paid_amount
+    }, { transaction: t });
 
-    await transaction.commit();
-
+    await t.commit();
     res.json(invoice);
-
   } catch (error) {
-    if (transaction.finished !== 'commit') {
-      await transaction.rollback();
-    }
-    
-    console.error('Error al actualizar factura:', error);
-    
-    // Manejar error de duplicado
-    if (error.name === 'SequelizeUniqueConstraintError') {
-      return res.status(400).json({ 
-        error: 'Número de factura duplicado',
-        details: 'El número de factura ya existe en el sistema'
-      });
-    }
-    
-    res.status(500).json({ 
-      error: 'Error al actualizar factura',
-      details: process.env.NODE_ENV === 'development' ? error.message : null
-    });
+    if (t.finished !== 'commit') await t.rollback();
+    console.error('❌ updatesale:', error);
+    res.status(500).json({ error: 'Error al actualizar factura', details: error.message });
   }
 });
 
-// ROUTE-5: Eliminar factura
-router.delete('/deletesale/:id', async (req, res) => {
-  const transaction = await sequelize.transaction();
-  
+// ---------- ELIMINAR POR invoice_number ----------
+router.delete('/deletesale/:invoice_number', async (req, res) => {
+  const t = await sequelize.transaction();
   try {
-    const invoice = await Invoice.findByPk(req.params.id);
+    const invoice = await Invoice.findByPk(req.params.invoice_number);
     if (!invoice) {
-      await transaction.rollback();
+      await t.rollback();
       return res.status(404).json({ error: 'Factura no encontrada' });
     }
-
-    // Eliminar la factura
-    await Invoice.destroy({ 
-      where: { id: req.params.id },
-      transaction 
-    });
-
-    await transaction.commit();
+    await Invoice.destroy({ where: { invoice_number: req.params.invoice_number }, transaction: t });
+    await t.commit();
     res.json({ success: true, message: 'Factura eliminada correctamente' });
-
   } catch (error) {
-    if (transaction.finished !== 'commit') {
-      await transaction.rollback();
-    }
-    
-    console.error('Error al eliminar factura:', error);
-    res.status(500).json({ 
-      error: 'Error al eliminar factura',
-      details: process.env.NODE_ENV === 'development' ? error.message : null
-    });
+    if (t.finished !== 'commit') await t.rollback();
+    console.error('❌ deletesale:', error);
+    res.status(500).json({ error: 'Error al eliminar factura', details: error.message });
   }
 });
 
-// ROUTE-6: Obtener factura por número de factura
-router.get('/getbyinvoice/:invoice_number', async (req, res) => {
+// ---------- NUEVA: Registrar pago (abono) a crédito ----------
+router.post('/invoices/pay/:invoice_number', async (req, res) => {
+  const t = await sequelize.transaction();
   try {
-    const invoice = await Invoice.findOne({
-      where: { invoice_number: req.params.invoice_number }
-    });
-    
+    const { invoice_number } = req.params;
+    const { amount } = req.body;
+
+    const amt = Number(amount);
+    if (!amt || amt <= 0) {
+      await t.rollback();
+      return res.status(400).json({ error: 'Monto inválido' });
+    }
+
+    const invoice = await Invoice.findByPk(invoice_number, { transaction: t, lock: t.LOCK.UPDATE });
     if (!invoice) {
+      await t.rollback();
       return res.status(404).json({ error: 'Factura no encontrada' });
     }
 
-    res.json(invoice);
-  } catch (error) {
-    console.error('Error al buscar factura:', error);
-    res.status(500).json({ 
-      error: 'Error al buscar factura',
-      details: process.env.NODE_ENV === 'development' ? error.message : null
+    const method = String(invoice.payment_method || 'cash').toLowerCase();
+    if (method !== 'credit') {
+      await t.rollback();
+      return res.status(400).json({ error: 'La factura no es a crédito' });
+    }
+
+    const absTotal = Math.abs(Number(invoice.total) || 0);
+    const alreadyPaid = Number(invoice.paid_amount || 0);
+    const balance = Math.max(absTotal - alreadyPaid, 0);
+
+    if (balance <= 0) {
+      await t.rollback();
+      return res.status(400).json({ error: 'La factura ya está saldada' });
+    }
+    if (amt > balance) {
+      await t.rollback();
+      return res.status(400).json({ error: 'El abono excede el balance' });
+    }
+
+    const newPaid = alreadyPaid + amt;
+    await invoice.update({ paid_amount: newPaid }, { transaction: t });
+    await t.commit();
+
+    res.json({
+      success: true,
+      invoice: {
+        invoice_number: invoice.invoice_number,
+        customer_name: invoice.customer_name,
+        payment_method: invoice.payment_method,
+        total: absTotal,
+        paid_amount: newPaid,
+        balance: Math.max(absTotal - newPaid, 0),
+        date_time: invoice.date_time,
+        seller_id: invoice.seller_id
+      }
     });
+  } catch (error) {
+    if (t.finished !== 'commit') await t.rollback();
+    console.error('❌ invoices/pay:', error);
+    res.status(500).json({ success: false, error: 'Error al registrar el pago', details: error.message });
   }
 });
 
-// ROUTE-7: Obtener estadísticas de ventas por vendedor
+// ---------- (opcional) Estadísticas: tal cual la tuya ----------
 router.post('/vendedor-stats', async (req, res) => {
   try {
     const { startDate, endDate } = req.body;
-    
-    // Construir la condición WHERE basada en las fechas proporcionadas
-    let whereCondition = '';
-    let queryParams = [];
-    
+    let where = '';
+    const params = [];
     if (startDate && endDate) {
-      whereCondition = 'WHERE date_time BETWEEN ? AND ?';
-      queryParams = [startDate, endDate + ' 23:59:59'];
+      where = 'WHERE date_time BETWEEN ? AND ?';
+      params.push(startDate, endDate + ' 23:59:59');
     } else if (startDate) {
-      whereCondition = 'WHERE date_time >= ?';
-      queryParams = [startDate];
+      where = 'WHERE date_time >= ?';
+      params.push(startDate);
     } else if (endDate) {
-      whereCondition = 'WHERE date_time <= ?';
-      queryParams = [endDate + ' 23:59:59'];
+      where = 'WHERE date_time <= ?';
+      params.push(endDate + ' 23:59:59');
     }
 
-    const query = `
-      SELECT 
-        COALESCE(vendedor_id, 0) as vendedor_id,
-        COUNT(invoice_number) as cantidad_ventas,
-        SUM(total) as total_ventas
+    const q = `
+      SELECT COALESCE(seller_id, 0) AS seller_id,
+             COUNT(invoice_number) AS cantidad_ventas,
+             SUM(total) AS total_ventas
       FROM invoices
-      ${whereCondition}
-      GROUP BY COALESCE(vendedor_id, 0)
+      ${where}
+      GROUP BY COALESCE(seller_id, 0)
       ORDER BY total_ventas DESC
     `;
-
-    console.log('Ejecutando consulta:', query);
-    console.log('Con parámetros:', queryParams);
-
-    // Ejecutar la consulta - CORRECCIÓN IMPORTANTE
-    const results = await sequelize.query(query, {
-      replacements: queryParams,
-      type: sequelize.QueryTypes.SELECT
-    });
-
-    // Asegurarnos de que siempre sea un array
-    const stats = Array.isArray(results) ? results : [];
-    
-    console.log('Resultados obtenidos:', stats.length, 'vendedores');
-    
-    res.json({
-      success: true,
-      data: stats
-    });
-
+    const data = await sequelize.query(q, { replacements: params, type: QueryTypes.SELECT });
+    res.json({ success: true, data });
   } catch (error) {
-    console.error('❌ ERROR en vendedor-stats:', error.message);
-    console.error('📌 STACK:', error.stack);
-    
-    res.status(500).json({ 
-      success: false,
-      error: 'Error al obtener estadísticas de ventas',
-      details: process.env.NODE_ENV === 'development' ? error.message : null
-    });
+    console.error('❌ vendedor-stats:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener estadísticas de ventas', details: error.message });
   }
 });
+
 module.exports = router;
+
