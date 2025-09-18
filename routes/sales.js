@@ -274,6 +274,7 @@ router.post('/vendedor-stats', async (req, res) => {
     res.json({ success: true, data });
   } catch (error) {
     console.error('❌ vendedor-stats:', error);
+    console.error('❌ vendedor-stats:', error);
     res.status(500).json({ success: false, error: 'Error al obtener estadísticas de ventas', details: error.message });
   }
 });
