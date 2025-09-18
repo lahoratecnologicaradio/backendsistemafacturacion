@@ -1,3 +1,4 @@
+// models/Invoice.js
 const { DataTypes } = require('sequelize');
 const { sequelize } = require('../db');
 
@@ -5,7 +6,7 @@ const Invoice = sequelize.define('Invoice', {
   invoice_number: {
     type: DataTypes.INTEGER,
     allowNull: false,
-    primaryKey: true // 👈 clave primaria en vez de id si la tabla no tiene 'id'
+    primaryKey: true
   },
   date_time: {
     type: DataTypes.DATE,
@@ -26,10 +27,27 @@ const Invoice = sequelize.define('Invoice', {
   change: {
     type: DataTypes.DECIMAL(10, 2),
     allowNull: false
+  },
+
+  // 🔽 NUEVOS (opcionales) para vendedor y pagos a crédito
+  seller_id: {
+    type: DataTypes.INTEGER,     // o STRING si lo manejas así
+    allowNull: true
+  },
+  payment_method: {
+    type: DataTypes.STRING,      // 'cash' | 'credit'
+    allowNull: true,
+    defaultValue: 'cash'
+  },
+  paid_amount: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: false,
+    defaultValue: 0
   }
 }, {
-  tableName: 'invoices', // 👈 apunta a la tabla real
-  timestamps: false       // 👈 ponlo en false si la tabla NO tiene createdAt/updatedAt
+  tableName: 'invoices',
+  timestamps: false
 });
 
 module.exports = Invoice;
+
