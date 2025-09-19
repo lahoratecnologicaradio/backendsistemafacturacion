@@ -63,7 +63,7 @@ function normalizeToYMD(input) {
 // Include común (cliente, vendedor, resultado)
 const COMMON_INCLUDE = [
   { model: Customer,  as: 'cliente',  attributes: ['id','full_name','address','c_number'] },
-  { model: Vendedor,  as: 'vendedor', attributes: ['id','nombre','email'] },
+  { model: Vendedor,  as: 'vendedor', attributes: ['id','nombre'] },
   { model: ResultadoVisita, as: 'resultado', required: false },
 ];
 
@@ -176,7 +176,7 @@ router.get('/resumen-dia/:vendedorId/:fecha', async (req, res) => {
         { model: Customer, as: 'cliente', attributes: ['id','full_name','address','c_number','product_name','total','due_date'] },
         { model: ResultadoVisita, as: 'resultado', required: false,
           attributes: ['id','visita_id','interes_cliente','probabilidad_venta','productos_interes','pedido_realizado','monto_potencial','observaciones','proxima_visita','created_at'] },
-        { model: Vendedor, as: 'vendedor', attributes: ['id','nombre','email'] }
+        { model: Vendedor, as: 'vendedor', attributes: ['id','nombre'] }
       ],
       order: [['estado','ASC'], ['prioridad','DESC'], ['hora_programada','ASC']]
     });
@@ -193,7 +193,7 @@ router.get('/resumen-dia/:vendedorId/:fecha', async (req, res) => {
     res.json({
       success: true,
       fecha: ymd,
-      vendedor: { id: vendedor.id, nombre: vendedor.nombre, email: vendedor.email },
+      vendedor: { id: vendedor.id, nombre: vendedor.nombre },
       resumen: {
         total_visitas: total,
         realizadas: realizadas.length,
@@ -318,7 +318,7 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
     const ymd = normalizeToYMD(fecha);
     if (!ymd) return res.status(400).json({ success: false, message: 'Fecha inválida (use YYYY-MM-DD)' });
 
-    const vendedor = await Vendedor.findByPk(vendedorId, { attributes: ['id','nombre','email'] });
+    const vendedor = await Vendedor.findByPk(vendedorId, { attributes: ['id','nombre'] });
     if (!vendedor) return res.status(404).json({ success: false, message: 'Vendedor no encontrado' });
 
     // Si NO hay Invoice, responde stub amigable
@@ -326,7 +326,7 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
       return res.json({
         success: true,
         fecha: ymd,
-        vendedor: { id: vendedor.id, nombre: vendedor.nombre, email: vendedor.email },
+        vendedor: { id: vendedor.id, nombre: vendedor.nombre },
         resumen_cobros: {
           total_contado: '0.00',
           total_credito: '0.00',
@@ -459,7 +459,7 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
     return res.json({
       success: true,
       fecha: ymd,
-      vendedor: { id: vendedor.id, nombre: vendedor.nombre, email: vendedor.email },
+      vendedor: { id: vendedor.id, nombre: vendedor.nombre },
       resumen_cobros: {
         total_contado: totalContado.toFixed(2),
         total_credito: totalCredito.toFixed(2),
@@ -633,5 +633,6 @@ router.delete('/:id', async (req, res) => {
 });
 
 module.exports = router;
+
 
 
