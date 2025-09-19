@@ -1,4 +1,6 @@
 // routes/visitas.js
+'use strict';
+
 const express = require('express');
 const router = express.Router();
 const { Op, fn, col, literal } = require('sequelize');
@@ -13,11 +15,17 @@ const Customer         = require('../models/Customer');
 let Invoice = null;
 let Payment = null;
 try {
-  Invoice = require('../models/Invoice');   // Debe exponer: seller_id, customer_id, invoice_number, date_time, total, payment_method, paid_amount, balance, paid_at
-} catch (_) {}
+  // Debe exponer: seller_id, customer_id, invoice_number, date_time, total, payment_method, paid_amount, balance, paid_at
+  Invoice = require('../models/Invoice');
+} catch (_) {
+  console.warn('[visitas] Modelo Invoice no disponible');
+}
 try {
-  Payment = require('../models/Payment');   // Debe exponer: invoice_id, seller_id, amount, created_at  (+ asoc. Payment.belongsTo(Invoice, { as: 'invoice' }))
-} catch (_) {}
+  // Debe exponer: invoice_id, seller_id, amount, created_at  (+ asoc. Payment.belongsTo(Invoice, { as: 'invoice' }))
+  Payment = require('../models/Payment');
+} catch (_) {
+  console.warn('[visitas] Modelo Payment no disponible');
+}
 
 /* ===================== *
  *  Helpers de Fechas    *
@@ -308,11 +316,12 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
   try {
     const { vendedorId, fecha } = req.params;
     const ymd = normalizeToYMD(fecha);
-    if (!ymd) return res.status(400).json({ success: false, message: 'Fecha inválida' });
+    if (!ymd) return res.status(400).json({ success: false, message: 'Fecha inválida (use YYYY-MM-DD)' });
 
     const vendedor = await Vendedor.findByPk(vendedorId, { attributes: ['id','nombre','email'] });
     if (!vendedor) return res.status(404).json({ success: false, message: 'Vendedor no encontrado' });
 
+    // Si NO hay Invoice, responde stub amigable
     if (!Invoice) {
       return res.json({
         success: true,
@@ -357,7 +366,7 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
       });
     }
 
-    // 2b) Fallback: facturas de crédito liquidadas ese día (sin tabla payments)
+    // 2b) Fallback: facturas de crédito liquidadas ese día (sin tabla payments o sin resultados)
     let creditSettledInvoices = [];
     if (!usedPaymentsTable || creditPayments.length === 0) {
       creditSettledInvoices = await Invoice.findAll({
@@ -461,8 +470,11 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
       detalles_cobros: detalles
     });
   } catch (e) {
-    console.error('GET /visitas/cobros/:vendedorId/:fecha', e);
-    res.status(500).json({ success: false, message: 'Error interno del servidor' });
+    console.error('GET /visitas/cobros/:vendedorId/:fecha ERROR =>', e);
+    // En desarrollo puedes enviar el detalle para depurar más rápido.
+    const payload = { success: false, message: 'Error interno del servidor' };
+    if (process.env.NODE_ENV !== 'production') payload.error = String(e && e.message || e);
+    res.status(500).json(payload);
   }
 });
 
@@ -621,4 +633,5 @@ router.delete('/:id', async (req, res) => {
 });
 
 module.exports = router;
+
 
