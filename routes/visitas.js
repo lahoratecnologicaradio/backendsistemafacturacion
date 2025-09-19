@@ -15,13 +15,13 @@ const Customer         = require('../models/Customer');
 let Invoice = null;
 let Payment = null;
 try {
-  // Debe exponer: seller_id, customer_id, invoice_number, date_time, total, payment_method, paid_amount, balance, paid_at
+  // Debe exponer: vendedor_id, customer_id, invoice_number, date_time, total, payment_method, paid_amount, balance, paid_at
   Invoice = require('../models/Invoice');
 } catch (_) {
   console.warn('[visitas] Modelo Invoice no disponible');
 }
 try {
-  // Debe exponer: invoice_id, seller_id, amount, created_at  (+ asoc. Payment.belongsTo(Invoice, { as: 'invoice' }))
+  // Debe exponer: invoice_id, vendedor_id, amount, created_at  (+ asoc. Payment.belongsTo(Invoice, { as: 'invoice' }))
   Payment = require('../models/Payment');
 } catch (_) {
   console.warn('[visitas] Modelo Payment no disponible');
@@ -342,7 +342,7 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
     // 1) Ventas al contado del día (SIN include)
     const cashSales = await Invoice.findAll({
       where: literal(`
-        seller_id=${Number(vendedorId)}
+        vendedor_id=${Number(vendedorId)}
         AND payment_method IN ('cash','contado')
         AND DATE(date_time)='${ymd}'
       `),
@@ -355,7 +355,7 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
     if (Payment) {
       usedPaymentsTable = true;
       creditPayments = await Payment.findAll({
-        where: literal(`seller_id=${Number(vendedorId)} AND DATE(created_at)='${ymd}'`),
+        where: literal(`vendedor_id=${Number(vendedorId)} AND DATE(created_at)='${ymd}'`),
         order: [['created_at','ASC']]
       });
     }
@@ -365,7 +365,7 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
     if (!usedPaymentsTable || creditPayments.length === 0) {
       creditSettledInvoices = await Invoice.findAll({
         where: literal(`
-          seller_id=${Number(vendedorId)}
+          vendedor_id=${Number(vendedorId)}
           AND payment_method IN ('credit','crédito')
           AND DATE(paid_at)='${ymd}'
           AND COALESCE(paid_amount,0) > 0
