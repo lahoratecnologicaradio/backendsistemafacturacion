@@ -13,7 +13,7 @@ const Customer         = require('../models/Customer');
 // ⚠️ Modelos opcionales
 let Invoice = null;
 let Payment = null;
-// Modelo opcional para capacitación (si existe)
+// Modelo para capacitación
 let TrainingVideo = null;
 
 try {
@@ -28,10 +28,10 @@ try {
   console.warn('[visitas] Modelo Payment no disponible');
 }
 try {
-  // Estructura sugerida: id, titulo (string), url (string), orden (int opcional), created_at/updated_at
+  // Tabla: training_videos (id, titulo, url, orden, is_active, created_at, updated_at)
   TrainingVideo = require('../models/TrainingVideo');
 } catch (_) {
-  console.warn('[visitas] Modelo TrainingVideo no disponible (se usará respuesta de ejemplo)');
+  console.warn('[visitas] Modelo TrainingVideo no disponible');
 }
 
 /* ===================== *
@@ -67,6 +67,26 @@ function normalizeToYMD(input) {
   return null;
 }
 
+// Valida una URL básica de YouTube (youtube.com/watch?v=... | youtu.be/...)
+function isValidYouTubeUrl(url) {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\./, '');
+    const isYT = host === 'youtube.com' || host === 'youtu.be';
+    if (!isYT) return false;
+
+    if (host === 'youtu.be') {
+      return u.pathname && u.pathname.length > 1; // /VIDEOID
+    }
+    if (host === 'youtube.com') {
+      return Boolean(u.searchParams.get('v')) || u.pathname.startsWith('/embed/');
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 // Include común (cliente, vendedor, resultado)
 const COMMON_INCLUDE = [
   { model: Customer,  as: 'cliente',  attributes: ['id','full_name','address','c_number'] },
@@ -75,46 +95,84 @@ const COMMON_INCLUDE = [
 ];
 
 /* ========================================================= *
- * NUEVA RUTA: Capacitación                                  *
- * Devuelve un array plano: [{ id, titulo, url }, ...]       *
- * URL: GET /api/visitas/capacitacion                        *
+ * NUEVAS RUTAS: Capacitación                                *
+ * URLs:
+ *   GET  /api/visitas/capacitacion
+ *   POST /api/visitas/capacitacion
  * ========================================================= */
+
+// GET: lista de videos activos (array plano)
 router.get('/capacitacion', async (_req, res) => {
   try {
-    // Si hay modelo en BD, usarlo
     if (TrainingVideo) {
       const rows = await TrainingVideo.findAll({
-        attributes: ['id', 'titulo', 'url', 'orden', 'created_at', 'updated_at'].filter(Boolean),
+        where: { is_active: 1 },
+        attributes: ['id', 'titulo', 'url', 'orden', 'is_active'],
         order: [['orden', 'ASC'], ['id', 'ASC']],
       });
 
-      const list = rows.map((r, i) => ({
-        id: r.id ?? i + 1,
-        titulo: r.titulo ?? `Video ${i + 1}`,
-        url: r.url ?? '',
+      // El front puede ignorar campos extra; devolvemos id/titulo/url (+orden opcional)
+      const list = rows.map(r => ({
+        id: r.id,
+        titulo: r.titulo,
+        url: r.url,
+        orden: r.orden ?? 0,
+        is_active: r.is_active ? 1 : 0,
       }));
 
-      return res.json(list); // <-- arreglo directo (no { success, data })
+      return res.json(list); // arreglo directo
     }
 
     // Fallback sin modelo (ejemplos)
     const fallback = [
-      {
-        id: 1,
-        titulo: 'Cómo hacer un pedido',
-        url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-      },
-      {
-        id: 2,
-        titulo: 'Cómo cobrar una factura',
-        url: 'https://youtu.be/9bZkp7q19f0',
-      },
+      { id: 1, titulo: 'Cómo hacer un pedido', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', orden: 1, is_active: 1 },
+      { id: 2, titulo: 'Cómo cobrar una factura', url: 'https://youtu.be/9bZkp7q19f0', orden: 2, is_active: 1 },
     ];
-    return res.json(fallback); // <-- arreglo directo
+    return res.json(fallback);
   } catch (e) {
     console.error('GET /visitas/capacitacion ERROR =>', e);
-    // En error, responde arreglo vacío (el front lo soporta)
-    return res.status(200).json([]);
+    return res.status(200).json([]); // el front tolera arreglo vacío
+  }
+});
+
+// POST: crear video de capacitación
+router.post('/capacitacion', async (req, res) => {
+  try {
+    if (!TrainingVideo) {
+      return res.status(501).json({ success: false, message: 'Modelo TrainingVideo no disponible en el servidor.' });
+    }
+
+    const { titulo, url, orden, is_active } = req.body || {};
+    if (!titulo || !url) {
+      return res.status(400).json({ success: false, message: 'Campos requeridos: titulo, url.' });
+    }
+    if (!isValidYouTubeUrl(String(url))) {
+      return res.status(400).json({ success: false, message: 'URL de YouTube inválida.' });
+    }
+
+    const payload = {
+      titulo: String(titulo).trim(),
+      url: String(url).trim(),
+    };
+
+    if (orden !== undefined && !Number.isNaN(Number(orden))) payload.orden = Number(orden);
+    if (is_active !== undefined) payload.is_active = Number(is_active) ? 1 : 0;
+
+    const created = await TrainingVideo.create(payload);
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        id: created.id,
+        titulo: created.titulo,
+        url: created.url,
+        orden: created.orden ?? 0,
+        is_active: created.is_active ? 1 : 0,
+      },
+    });
+  } catch (e) {
+    console.error('POST /visitas/capacitacion ERROR =>', e);
+    return res.status(500).json({ success: false, message: 'Error interno del servidor' });
   }
 });
 
@@ -314,7 +372,7 @@ router.post('/registrar-resultado', async (req, res) => {
     // Registrar resultado
     const resultado = await ResultadoVisita.create({
       visita_id: visita.id,
-      interes_cliente: interes_cliente || 'medio',
+      interes_cliente: interesCliente || interes_cliente || 'medio',
       probabilidad_venta: probabilidad_venta || 'media',
       productos_interes: productos_interes || '',
       pedido_realizado: !!pedido_realizado,
@@ -632,4 +690,5 @@ router.delete('/:id', async (req, res) => {
 });
 
 module.exports = router;
+
 
