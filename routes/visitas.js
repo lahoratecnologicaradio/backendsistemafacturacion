@@ -1,11 +1,23 @@
+// routes/visitas.js
 const express = require('express');
 const router = express.Router();
-const { Op } = require('sequelize');
+const { Op, fn, col, literal } = require('sequelize');
 
 const VisitaProgramada = require('../models/VisitaProgramada');
-const ResultadoVisita = require('../models/ResultadoVisita');
-const Vendedor = require('../models/Vendedor');
-const Customer = require('../models/Customer');
+const ResultadoVisita  = require('../models/ResultadoVisita');
+const Vendedor         = require('../models/Vendedor');
+const Customer         = require('../models/Customer');
+
+// ⚠️ Estos dos son necesarios para que /cobros sume ventas reales.
+// Si aún no tienes los modelos, deja el require en try/catch.
+let Invoice = null;
+let Payment = null;
+try {
+  Invoice = require('../models/Invoice');   // Debe exponer: seller_id, customer_id, invoice_number, date_time, total, payment_method, paid_amount, balance, paid_at
+} catch (_) {}
+try {
+  Payment = require('../models/Payment');   // Debe exponer: invoice_id, seller_id, amount, created_at  (+ asoc. Payment.belongsTo(Invoice, { as: 'invoice' }))
+} catch (_) {}
 
 /* ===================== *
  *  Helpers de Fechas    *
@@ -29,13 +41,21 @@ function normalizeToYMD(input) {
     const [, dd, mm, yyyy] = m;
     return `${yyyy}-${mm}-${dd}`;
   }
+  // Último intento: Date() nativo
+  const d = new Date(input);
+  if (!Number.isNaN(d.getTime())) {
+    const y = d.getFullYear();
+    const M = String(d.getMonth() + 1).padStart(2, '0');
+    const D = String(d.getDate()).padStart(2, '0');
+    return `${y}-${M}-${D}`;
+  }
   return null;
 }
 
 // Include común (cliente, vendedor, resultado)
 const COMMON_INCLUDE = [
-  { model: Customer, as: 'cliente', attributes: ['id','full_name','address','c_number'] },
-  { model: Vendedor, as: 'vendedor', attributes: ['id','nombre','email'] },
+  { model: Customer,  as: 'cliente',  attributes: ['id','full_name','address','c_number'] },
+  { model: Vendedor,  as: 'vendedor', attributes: ['id','nombre','email'] },
   { model: ResultadoVisita, as: 'resultado', required: false },
 ];
 
@@ -184,7 +204,6 @@ router.get('/resumen-dia/:vendedorId/:fecha', async (req, res) => {
 
 /* ========================================================= *
  * 5) Registrar resultado (por visita_id o por datos)        *
- *    (consolidado; evita duplicados de ruta)                *
  * ========================================================= */
 router.post('/registrar-resultado', async (req, res) => {
   try {
@@ -281,7 +300,9 @@ router.get('/historial/:vendedorId', async (req, res) => {
 });
 
 /* ========================================================= *
- * 7) Cobros de un vendedor en una fecha                     *
+ * 7) Cobros de un vendedor en una fecha (ventas reales)     *
+ *     - Contado del día (Invoice)
+ *     - Abonos de crédito del día (Payment) o fallback por paid_at
  * ========================================================= */
 router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
   try {
@@ -289,46 +310,144 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
     const ymd = normalizeToYMD(fecha);
     if (!ymd) return res.status(400).json({ success: false, message: 'Fecha inválida' });
 
-    const vendedor = await Vendedor.findByPk(vendedorId);
+    const vendedor = await Vendedor.findByPk(vendedorId, { attributes: ['id','nombre','email'] });
     if (!vendedor) return res.status(404).json({ success: false, message: 'Vendedor no encontrado' });
 
-    const realizadas = await VisitaProgramada.findAll({
-      where: { vendedor_id: vendedorId, fecha_programada: ymd, estado: 'realizada' },
-      include: [
-        { model: Customer, as: 'cliente', attributes: ['id','full_name','c_number','address'] },
-        { model: ResultadoVisita, as: 'resultado', required: true }
-      ],
-      order: [['hora_programada','ASC']]
+    if (!Invoice) {
+      return res.json({
+        success: true,
+        fecha: ymd,
+        vendedor: { id: vendedor.id, nombre: vendedor.nombre, email: vendedor.email },
+        resumen_cobros: {
+          total_contado: '0.00',
+          total_credito: '0.00',
+          total_general: '0.00',
+          cantidad_ventas: 0,
+          promedio_venta: '0.00'
+        },
+        detalles_cobros: [],
+        warning: 'Modelo Invoice no disponible en el servidor'
+      });
+    }
+
+    // 1) Ventas al contado del día
+    const cashSales = await Invoice.findAll({
+      where: literal(`
+        seller_id=${Number(vendedorId)}
+        AND payment_method IN ('cash','contado')
+        AND DATE(date_time)='${ymd}'
+      `),
+      include: [{ model: Customer, as: 'customer', attributes: ['id','full_name','c_number','address'] }],
+      order: [['date_time','ASC']]
     });
 
+    // 2) Abonos a crédito del día (tabla Payments si existe)
+    let creditPayments = [];
+    let usedPaymentsTable = false;
+    if (Payment) {
+      usedPaymentsTable = true;
+      creditPayments = await Payment.findAll({
+        where: literal(`seller_id=${Number(vendedorId)} AND DATE(created_at)='${ymd}'`),
+        include: [{
+          model: Invoice, as: 'invoice',
+          include: [{ model: Customer, as: 'customer', attributes: ['id','full_name','c_number','address'] }],
+          attributes: ['id','invoice_number','customer_id','seller_id','payment_method','date_time']
+        }],
+        order: [['created_at','ASC']]
+      });
+    }
+
+    // 2b) Fallback: facturas de crédito liquidadas ese día (sin tabla payments)
+    let creditSettledInvoices = [];
+    if (!usedPaymentsTable || creditPayments.length === 0) {
+      creditSettledInvoices = await Invoice.findAll({
+        where: literal(`
+          seller_id=${Number(vendedorId)}
+          AND payment_method IN ('credit','crédito')
+          AND DATE(paid_at)='${ymd}'
+          AND COALESCE(paid_amount,0) > 0
+        `),
+        include: [{ model: Customer, as: 'customer', attributes: ['id','full_name','c_number','address'] }],
+        order: [['paid_at','ASC']]
+      });
+    }
+
+    // Armar respuesta
     let totalContado = 0, totalCredito = 0, totalGeneral = 0;
     const detalles = [];
 
-    realizadas.forEach(v => {
-      const r = v.resultado || {};
-      const contado = parseFloat(r.monto_contado) || 0;
-      const credito = parseFloat(r.monto_credito) || 0;
-      const total = parseFloat(r.monto_total) || (contado + credito);
-      totalContado += contado;
-      totalCredito += credito;
-      totalGeneral += total;
+    for (const inv of cashSales) {
+      const monto = Number(inv.total) || 0;
+      totalContado += monto;
+      totalGeneral += monto;
       detalles.push({
-        visita_id: v.id,
-        cliente_id: v.cliente.id,
-        cliente_nombre: v.cliente.full_name,
-        cliente_numero: v.cliente.c_number,
-        cliente_direccion: v.cliente.address,
-        monto_contado: contado,
-        monto_credito: credito,
-        monto_total: total,
-        tipo_pago: r.tipo_pago,
-        observaciones: r.observaciones,
-        hora_visita: v.hora_programada,
-        fecha_visita: v.fecha_programada
+        visita_id: inv.id, // usamos id de la factura para key
+        cliente_id: inv.customer?.id,
+        cliente_nombre: inv.customer?.full_name,
+        cliente_numero: inv.customer?.c_number,
+        cliente_direccion: inv.customer?.address,
+        monto_contado: monto,
+        monto_credito: 0,
+        monto_total: monto,
+        tipo_pago: 'contado',
+        observaciones: null,
+        hora_visita: inv.date_time,
+        fecha_visita: ymd
       });
+    }
+
+    for (const p of creditPayments) {
+      const inv = p.invoice || {};
+      const cust = inv.customer || {};
+      const amount = Number(p.amount) || 0;
+      totalCredito += amount;
+      totalGeneral += amount;
+      detalles.push({
+        visita_id: p.id, // id del pago
+        cliente_id: cust.id,
+        cliente_nombre: cust.full_name,
+        cliente_numero: cust.c_number,
+        cliente_direccion: cust.address,
+        monto_contado: 0,
+        monto_credito: amount,
+        monto_total: amount,
+        tipo_pago: 'credito',
+        observaciones: 'ABONO A CRÉDITO',
+        hora_visita: p.created_at,
+        fecha_visita: ymd
+      });
+    }
+
+    for (const inv of creditSettledInvoices) {
+      const cust = inv.customer || {};
+      const amount = Number(inv.paid_amount) || 0;
+      if (amount <= 0) continue;
+      totalCredito += amount;
+      totalGeneral += amount;
+      detalles.push({
+        visita_id: inv.id,
+        cliente_id: cust.id,
+        cliente_nombre: cust.full_name,
+        cliente_numero: cust.c_number,
+        cliente_direccion: cust.address,
+        monto_contado: 0,
+        monto_credito: amount,
+        monto_total: amount,
+        tipo_pago: 'credito',
+        observaciones: 'FACTURA SALDADA',
+        hora_visita: inv.paid_at || inv.date_time,
+        fecha_visita: ymd
+      });
+    }
+
+    // Orden por hora
+    detalles.sort((a, b) => {
+      const ta = new Date(a.hora_visita).getTime() || 0;
+      const tb = new Date(b.hora_visita).getTime() || 0;
+      return ta - tb;
     });
 
-    res.json({
+    return res.json({
       success: true,
       fecha: ymd,
       vendedor: { id: vendedor.id, nombre: vendedor.nombre, email: vendedor.email },
@@ -351,14 +470,13 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
  * 8) Listados generales (/hoy, /dia/:fecha, /list)          *
  * ========================================================= */
 
-// HOY: pendientes + realizadas de TODOS (DATEONLY exacto)
-// HOY: pendientes + realizadas de TODOS (con diagnóstico)
+// HOY (diagnóstico incluido)
 router.get('/hoy', async (_req, res) => {
   try {
     const today = todayYMDLocal();
     console.log('[VISITAS /hoy] hoy(local)=', today);
 
-    // 1) Consulta normal (con estado)
+    // 1) Consulta normal (con estado esperado)
     const withEstado = await VisitaProgramada.findAll({
       where: { 
         fecha_programada: today, 
@@ -375,12 +493,12 @@ router.get('/hoy', async (_req, res) => {
     }, {});
     console.log('[VISITAS /hoy] con estado -> encontrados:', withEstado.length, 'por estado:', byEstado);
 
-    // 2) Si no encontró nada, probar SIN estado (puede haber valores inesperados)
+    // 2) Si no encontró nada, probar SIN estado
     let data = withEstado;
     let fallbackUsed = false;
     if (withEstado.length === 0) {
       const sinEstado = await VisitaProgramada.findAll({
-        where: { fecha_programada: today }, // sin filtro de estado
+        where: { fecha_programada: today },
         include: COMMON_INCLUDE,
         order: [['hora_programada','ASC'], ['prioridad','DESC']]
       });
@@ -390,7 +508,7 @@ router.get('/hoy', async (_req, res) => {
       fallbackUsed = true;
     }
 
-    // 3) Si aún sigue en 0, devolvemos además un top 5 "raw" de la tabla para comprobar conexión/BD
+    // 3) Sample cuando no hay datos
     let sample = [];
     if (data.length === 0) {
       sample = await VisitaProgramada.findAll({
@@ -408,14 +526,13 @@ router.get('/hoy', async (_req, res) => {
       count: data.length,
       used_fallback_no_estado: fallbackUsed,
       data,
-      sample_when_empty: sample // array vacío si sí hubo resultados
+      sample_when_empty: sample
     });
   } catch (e) {
     console.error('GET /visitas/hoy', e);
     res.status(500).json({ success: false, message: 'Error interno del servidor' });
   }
 });
-
 
 // DIA: pendientes + realizadas de TODOS en fecha exacta
 router.get('/dia/:fecha', async (req, res) => {
@@ -438,8 +555,7 @@ router.get('/dia/:fecha', async (req, res) => {
 
 // LIST: rango y filtros
 // ?estado=pendiente|realizada|en_curso|all (default all -> pendiente+realizada)
-// ?date=YYYY-MM-DD (atajo: from=to)
-// ?from=YYYY-MM-DD&to=YYYY-MM-DD
+// ?date=YYYY-MM-DD (atajo: from=to) | ?from=YYYY-MM-DD&to=YYYY-MM-DD
 // ?vendedor_id= &customer_id=
 router.get('/list', async (req, res) => {
   try {
@@ -505,3 +621,4 @@ router.delete('/:id', async (req, res) => {
 });
 
 module.exports = router;
+
