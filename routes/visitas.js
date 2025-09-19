@@ -11,11 +11,10 @@ const Vendedor         = require('../models/Vendedor');
 const Customer         = require('../models/Customer');
 
 // ⚠️ Estos dos son necesarios para que /cobros sume ventas reales.
-// Si aún no tienes los modelos, deja el require en try/catch.
 let Invoice = null;
 let Payment = null;
 try {
-  // Debe exponer: vendedor_id, customer_id, invoice_number, date_time, total, payment_method, paid_amount, balance, paid_at
+  // Debe exponer: vendedor_id/seller_id, customer_id, invoice_number, date_time, total, payment_method, paid_amount, paid_at
   Invoice = require('../models/Invoice');
 } catch (_) {
   console.warn('[visitas] Modelo Invoice no disponible');
@@ -58,6 +57,38 @@ function normalizeToYMD(input) {
     return `${y}-${M}-${D}`;
   }
   return null;
+}
+
+// Convierte un día LOCAL (YYYY-MM-DD) a rango UTC [startIso, endIso)
+// offsetMin: minutos respecto a UTC (ej. -240 para -04:00)
+function localDayToUtcRange(ymd, offsetMin) {
+  const [y, m, d] = ymd.split('-').map(Number);
+  // 00:00 local -> en UTC se mueve -offset (si offset=-240, sumamos 240 min)
+  const startMs = Date.UTC(y, m - 1, d, 0, 0, 0) - (offsetMin * 60 * 1000 * -1);
+  const endMs   = startMs + 24 * 60 * 60 * 1000;
+  return {
+    start: new Date(startMs).toISOString(),
+    end:   new Date(endMs).toISOString()
+  };
+}
+
+// Parsea ?offset=-240 o ?tz=-04:00; fallback -240 (Santo Domingo)
+function getClientOffset(req) {
+  const qOffset = Number.parseInt(req.query.offset, 10);
+  if (Number.isFinite(qOffset) && qOffset >= -720 && qOffset <= 840) return qOffset;
+  const qTz = (req.query.tz || '').trim();
+  const m = qTz.match(/^([+-])(\d{2}):?(\d{2})$/);
+  if (m) {
+    const sign = m[1] === '-' ? -1 : 1;
+    const hh = Number(m[2]) || 0;
+    const mm = Number(m[3]) || 0;
+    return sign * (hh * 60 + mm);
+  }
+  // Permite override por env
+  const envOff = Number.parseInt(process.env.DEFAULT_TZ_OFFSET_MINUTES, 10);
+  if (Number.isFinite(envOff)) return envOff;
+  // Default RD (-04:00)
+  return -240;
 }
 
 // Include común (cliente, vendedor, resultado)
@@ -312,6 +343,8 @@ router.get('/historial/:vendedorId', async (req, res) => {
  *    - Contado del día (Invoice)
  *    - Abonos de crédito del día (Payment) + SIEMPRE facturas saldadas por paid_at
  *      (evitar doble conteo si ya hay payments de esa factura)
+ *    - Usa rangos UTC calculados desde la fecha LOCAL
+ *      (?offset=-240 o ?tz=-04:00; default -240)
  * ========================================================= */
 router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
   try {
@@ -321,6 +354,9 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
 
     const vendedor = await Vendedor.findByPk(vendedorId, { attributes: ['id','nombre'] });
     if (!vendedor) return res.status(404).json({ success: false, message: 'Vendedor no encontrado' });
+
+    const offsetMin = getClientOffset(req);
+    const { start, end } = localDayToUtcRange(ymd, offsetMin);
 
     if (!Invoice) {
       return res.json({
@@ -339,38 +375,42 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
       });
     }
 
-    // -------- 1) Ventas al contado del día --------
+    // --- Detectar columna de vendedor en Invoice ---
+    const invSellerWhere = Invoice.rawAttributes?.vendedor_id
+      ? { vendedor_id: vendedorId }
+      : (Invoice.rawAttributes?.seller_id ? { seller_id: vendedorId } : literal('1=1'));
+
+    // -------- 1) Ventas al contado del día (rango UTC) --------
+    const cashWhere = {
+      [Op.and]: [
+        invSellerWhere,
+        { payment_method: { [Op.in]: ['cash','contado'] } },
+        { date_time: { [Op.between]: [start, end] } },
+      ],
+    };
+
     const cashSales = await Invoice.findAll({
-      where: literal(`
-        vendedor_id=${Number(vendedorId)}
-        AND payment_method IN ('cash','contado')
-        AND DATE(date_time)='${ymd}'
-      `),
+      where: cashWhere,
       order: [['date_time','ASC']]
     });
 
     // -------- 2) Pagos a crédito del día (tabla payments si existe) --------
     let creditPayments = [];
-    let paymentSellerFilter = `1=1`;
-    let paymentDateFilter  = `DATE(created_at)='${ymd}'`;
     let paymentInvoiceKey  = null; // 'invoice_id' o 'invoice_number'
     let paymentTimeField   = 'created_at';
+    let paymentTimeWhere   = null;
+    let paymentSellerWhere = literal('1=1');
 
     if (Payment) {
-      // Detectar columna de vendedor
+      if (Payment.rawAttributes?.paid_at) paymentTimeField = 'paid_at';
+      paymentTimeWhere = { [paymentTimeField]: { [Op.between]: [start, end] } };
+
       if (Payment.rawAttributes?.vendedor_id) {
-        paymentSellerFilter = `vendedor_id=${Number(vendedorId)}`;
+        paymentSellerWhere = { vendedor_id: vendedorId };
       } else if (Payment.rawAttributes?.seller_id) {
-        paymentSellerFilter = `seller_id=${Number(vendedorId)}`;
+        paymentSellerWhere = { seller_id: vendedorId };
       }
 
-      // Detectar campo de fecha
-      if (Payment.rawAttributes?.paid_at) {
-        paymentDateFilter = `DATE(paid_at)='${ymd}'`;
-        paymentTimeField = 'paid_at';
-      }
-
-      // Detectar FK hacia invoice
       if (Payment.rawAttributes?.invoice_id) {
         paymentInvoiceKey = 'invoice_id';
       } else if (Payment.rawAttributes?.invoice_number) {
@@ -378,7 +418,12 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
       }
 
       creditPayments = await Payment.findAll({
-        where: literal(`${paymentSellerFilter} AND (${paymentDateFilter})`),
+        where: {
+          [Op.and]: [
+            paymentSellerWhere,
+            paymentTimeWhere,
+          ]
+        },
         order: [[paymentTimeField, 'ASC']]
       });
     }
@@ -386,43 +431,44 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
     // 2a) Cargar facturas referenciadas por pagos
     let invoicesFromPayments = [];
     let keys = [];
-    if (paymentInvoiceKey) {
+    if (paymentInvoiceKey && creditPayments.length) {
       keys = creditPayments.map(p => p[paymentInvoiceKey]).filter(Boolean).map(v => String(v));
       if (keys.length) {
-        // Intentar por invoice_number (PK típico)
         if (Invoice.rawAttributes?.invoice_number) {
           invoicesFromPayments = await Invoice.findAll({ where: { invoice_number: keys } });
         } else if (Invoice.rawAttributes?.id) {
-          // Fallback por id
           invoicesFromPayments = await Invoice.findAll({ where: { id: keys } });
         }
       }
     }
-    const invoiceByNumber = new Map(
+    const invoiceByKey = new Map(
       invoicesFromPayments.map(inv => [String(inv.invoice_number ?? inv.id), inv])
     );
 
-    // -------- 3) Facturas de crédito saldadas ese día (siempre, para no perder ninguna) --------
+    // -------- 3) Facturas de crédito saldadas ese día (rango UTC SIEMPRE) --------
+    const settledWhere = {
+      [Op.and]: [
+        invSellerWhere,
+        { payment_method: { [Op.in]: ['credit','crédito'] } },
+        { paid_at: { [Op.between]: [start, end] } },
+        { paid_amount: { [Op.gt]: 0 } },
+      ]
+    };
     const creditSettledInvoices = await Invoice.findAll({
-      where: literal(`
-        vendedor_id=${Number(vendedorId)}
-        AND payment_method IN ('credit','crédito')
-        AND DATE(paid_at)='${ymd}'
-        AND COALESCE(paid_amount,0) > 0
-      `),
+      where: settledWhere,
       order: [['paid_at','ASC']]
     });
 
-    // --- Hidratar clientes (de contado + pagos + saldadas) ---
+    // --- Hidratar clientes ---
     const customerIds = new Set();
 
     // contado
     for (const inv of cashSales) if (inv.customer_id) customerIds.add(inv.customer_id);
 
-    // pagos: customer desde la invoice referenciada si existe
+    // pagos
     for (const p of creditPayments) {
       const key = paymentInvoiceKey ? String(p[paymentInvoiceKey]) : null;
-      const inv = key ? invoiceByNumber.get(key) : null;
+      const inv = key ? invoiceByKey.get(key) : null;
       if (inv?.customer_id) customerIds.add(inv.customer_id);
     }
 
@@ -437,7 +483,7 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
       : [];
     const customerMap = new Map(customers.map(c => [c.id, c]));
 
-    // --- Para evitar doble conteo: IDs de facturas que YA aportaron por pagos ---
+    // --- Evitar doble conteo: facturas ya presentes por pagos ---
     const paidInvoiceSet = new Set(
       (paymentInvoiceKey ? creditPayments.map(p => String(p[paymentInvoiceKey])).filter(Boolean) : [])
     );
@@ -473,7 +519,7 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
     // Pagos a crédito del día
     for (const p of creditPayments) {
       const invKey = paymentInvoiceKey ? String(p[paymentInvoiceKey]) : null;
-      const inv = invKey ? invoiceByNumber.get(invKey) : null;
+      const inv = invKey ? invoiceByKey.get(invKey) : null;
       const custObj = inv?.customer_id ? customerMap.get(inv.customer_id) : null;
 
       const amount = Number(p.amount) || 0;
@@ -496,18 +542,18 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
       });
     }
 
-    // Facturas de crédito saldadas ese día (evitar doble conteo si ya hubo pagos contados arriba)
+    // Facturas de crédito saldadas ese día (si no fueron ya contadas por pagos)
     for (const inv of creditSettledInvoices) {
       const invNum = String(inv.invoice_number ?? inv.id);
-      if (paidInvoiceSet.has(invNum)) continue; // ya contada por pagos
+      if (paidInvoiceSet.has(invNum)) continue;
 
       const amount = Number(inv.paid_amount) || 0;
       if (amount <= 0) continue;
 
+      const custObj = inv.customer_id ? customerMap.get(inv.customer_id) : null;
+
       totalCredito += amount;
       totalGeneral += amount;
-
-      const custObj = inv.customer_id ? customerMap.get(inv.customer_id) : null;
 
       detalles.push({
         visita_id: invNum,
@@ -532,6 +578,7 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
       return ta - tb;
     });
 
+    // Respuesta
     return res.json({
       success: true,
       fecha: ymd,
@@ -543,7 +590,9 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
         cantidad_ventas: detalles.length,
         promedio_venta: detalles.length ? (totalGeneral / detalles.length).toFixed(2) : '0.00'
       },
-      detalles_cobros: detalles
+      detalles_cobros: detalles,
+      // debug opcional:
+      debug: process.env.NODE_ENV !== 'production' ? { startUTC: start, endUTC: end, offsetMin } : undefined
     });
   } catch (e) {
     console.error('GET /visitas/cobros/:vendedorId/:fecha ERROR =>', e);
@@ -709,7 +758,6 @@ router.delete('/:id', async (req, res) => {
 });
 
 module.exports = router;
-
 
 
 
