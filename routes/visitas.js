@@ -3,7 +3,7 @@
 
 const express = require('express');
 const router = express.Router();
-const { Op, fn, col, literal } = require('sequelize');
+const { Op, literal } = require('sequelize');
 
 const VisitaProgramada = require('../models/VisitaProgramada');
 const ResultadoVisita  = require('../models/ResultadoVisita');
@@ -21,7 +21,7 @@ try {
   console.warn('[visitas] Modelo Invoice no disponible');
 }
 try {
-  // Debe exponer: invoice_id, vendedor_id, amount, created_at  (+ asoc. Payment.belongsTo(Invoice, { as: 'invoice' }))
+  // Debe exponer: (invoice_id o invoice_number), (vendedor_id o seller_id), amount, (created_at o paid_at)
   Payment = require('../models/Payment');
 } catch (_) {
   console.warn('[visitas] Modelo Payment no disponible');
@@ -309,8 +309,9 @@ router.get('/historial/:vendedorId', async (req, res) => {
 
 /* ========================================================= *
  * 7) Cobros de un vendedor en una fecha (ventas reales)     *
- *     - Contado del día (Invoice)
- *     - Abonos de crédito del día (Payment) o fallback por paid_at
+ *    - Contado del día (Invoice)
+ *    - Abonos de crédito del día (Payment) + SIEMPRE facturas saldadas por paid_at
+ *      (evitar doble conteo si ya hay payments de esa factura)
  * ========================================================= */
 router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
   try {
@@ -321,7 +322,6 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
     const vendedor = await Vendedor.findByPk(vendedorId, { attributes: ['id','nombre'] });
     if (!vendedor) return res.status(404).json({ success: false, message: 'Vendedor no encontrado' });
 
-    // Si NO hay Invoice, responde stub amigable
     if (!Invoice) {
       return res.json({
         success: true,
@@ -339,7 +339,7 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
       });
     }
 
-    // 1) Ventas al contado del día (SIN include)
+    // -------- 1) Ventas al contado del día --------
     const cashSales = await Invoice.findAll({
       where: literal(`
         vendedor_id=${Number(vendedorId)}
@@ -349,71 +349,100 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
       order: [['date_time','ASC']]
     });
 
-    // 2) Abonos a crédito del día (tabla Payments si existe) (SIN include)
+    // -------- 2) Pagos a crédito del día (tabla payments si existe) --------
     let creditPayments = [];
-    let usedPaymentsTable = false;
+    let paymentSellerFilter = `1=1`;
+    let paymentDateFilter  = `DATE(created_at)='${ymd}'`;
+    let paymentInvoiceKey  = null; // 'invoice_id' o 'invoice_number'
+    let paymentTimeField   = 'created_at';
+
     if (Payment) {
-      usedPaymentsTable = true;
+      // Detectar columna de vendedor
+      if (Payment.rawAttributes?.vendedor_id) {
+        paymentSellerFilter = `vendedor_id=${Number(vendedorId)}`;
+      } else if (Payment.rawAttributes?.seller_id) {
+        paymentSellerFilter = `seller_id=${Number(vendedorId)}`;
+      }
+
+      // Detectar campo de fecha
+      if (Payment.rawAttributes?.paid_at) {
+        paymentDateFilter = `DATE(paid_at)='${ymd}'`;
+        paymentTimeField = 'paid_at';
+      }
+
+      // Detectar FK hacia invoice
+      if (Payment.rawAttributes?.invoice_id) {
+        paymentInvoiceKey = 'invoice_id';
+      } else if (Payment.rawAttributes?.invoice_number) {
+        paymentInvoiceKey = 'invoice_number';
+      }
+
       creditPayments = await Payment.findAll({
-        where: literal(`vendedor_id=${Number(vendedorId)} AND DATE(created_at)='${ymd}'`),
-        order: [['created_at','ASC']]
+        where: literal(`${paymentSellerFilter} AND (${paymentDateFilter})`),
+        order: [[paymentTimeField, 'ASC']]
       });
     }
 
-    // 2b) Fallback: facturas de crédito liquidadas ese día (SIN include)
-    let creditSettledInvoices = [];
-    if (!usedPaymentsTable || creditPayments.length === 0) {
-      creditSettledInvoices = await Invoice.findAll({
-        where: literal(`
-          vendedor_id=${Number(vendedorId)}
-          AND payment_method IN ('credit','crédito')
-          AND DATE(paid_at)='${ymd}'
-          AND COALESCE(paid_amount,0) > 0
-        `),
-        order: [['paid_at','ASC']]
-      });
-    }
-
-    // === Hidratar clientes manualmente ===
-    // Recolecta todos los customer_id involucrados (cash, credit payments via invoice_id -> luego buscamos factura, y credit settled)
-    const customerIds = new Set();
-
-    // de contado
-    for (const inv of cashSales) {
-      if (inv.customer_id) customerIds.add(inv.customer_id);
-    }
-
-    // de pagos (necesitamos mapear payment.invoice_id -> invoice.customer_id)
-    const invoiceIdsFromPayments = creditPayments.map(p => p.invoice_id).filter(Boolean);
+    // 2a) Cargar facturas referenciadas por pagos
     let invoicesFromPayments = [];
-    if (invoiceIdsFromPayments.length > 0) {
-      invoicesFromPayments = await Invoice.findAll({
-        where: { id: invoiceIdsFromPayments }
-      });
-      for (const inv of invoicesFromPayments) {
-        if (inv.customer_id) customerIds.add(inv.customer_id);
+    let keys = [];
+    if (paymentInvoiceKey) {
+      keys = creditPayments.map(p => p[paymentInvoiceKey]).filter(Boolean).map(v => String(v));
+      if (keys.length) {
+        // Intentar por invoice_number (PK típico)
+        if (Invoice.rawAttributes?.invoice_number) {
+          invoicesFromPayments = await Invoice.findAll({ where: { invoice_number: keys } });
+        } else if (Invoice.rawAttributes?.id) {
+          // Fallback por id
+          invoicesFromPayments = await Invoice.findAll({ where: { id: keys } });
+        }
       }
     }
+    const invoiceByNumber = new Map(
+      invoicesFromPayments.map(inv => [String(inv.invoice_number ?? inv.id), inv])
+    );
 
-    // de facturas saldadas
-    for (const inv of creditSettledInvoices) {
-      if (inv.customer_id) customerIds.add(inv.customer_id);
+    // -------- 3) Facturas de crédito saldadas ese día (siempre, para no perder ninguna) --------
+    const creditSettledInvoices = await Invoice.findAll({
+      where: literal(`
+        vendedor_id=${Number(vendedorId)}
+        AND payment_method IN ('credit','crédito')
+        AND DATE(paid_at)='${ymd}'
+        AND COALESCE(paid_amount,0) > 0
+      `),
+      order: [['paid_at','ASC']]
+    });
+
+    // --- Hidratar clientes (de contado + pagos + saldadas) ---
+    const customerIds = new Set();
+
+    // contado
+    for (const inv of cashSales) if (inv.customer_id) customerIds.add(inv.customer_id);
+
+    // pagos: customer desde la invoice referenciada si existe
+    for (const p of creditPayments) {
+      const key = paymentInvoiceKey ? String(p[paymentInvoiceKey]) : null;
+      const inv = key ? invoiceByNumber.get(key) : null;
+      if (inv?.customer_id) customerIds.add(inv.customer_id);
     }
 
-    // Cargar clientes
+    // saldadas
+    for (const inv of creditSettledInvoices) if (inv.customer_id) customerIds.add(inv.customer_id);
+
     const customers = customerIds.size
       ? await Customer.findAll({
           where: { id: Array.from(customerIds) },
           attributes: ['id','full_name','c_number','address']
         })
       : [];
-
     const customerMap = new Map(customers.map(c => [c.id, c]));
 
-    // Map auxiliar para invoices de pagos
-    const invoiceMapFromPayments = new Map(invoicesFromPayments.map(inv => [inv.id, inv]));
+    // --- Para evitar doble conteo: IDs de facturas que YA aportaron por pagos ---
+    const paidInvoiceSet = new Set(
+      (paymentInvoiceKey ? creditPayments.map(p => String(p[paymentInvoiceKey])).filter(Boolean) : [])
+    );
 
-    // === Armar respuesta ===
+    // --- Armar respuesta ---
     let totalContado = 0, totalCredito = 0, totalGeneral = 0;
     const detalles = [];
 
@@ -423,14 +452,14 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
       totalContado += monto;
       totalGeneral += monto;
 
-      const cust = inv.customer_id ? customerMap.get(inv.customer_id) : null;
+      const custObj = inv.customer_id ? customerMap.get(inv.customer_id) : null;
 
       detalles.push({
-        visita_id: inv.id,
-        cliente_id: cust?.id || null,
-        cliente_nombre: cust?.full_name || null,
-        cliente_numero: cust?.c_number || null,
-        cliente_direccion: cust?.address || null,
+        visita_id: String(inv.invoice_number ?? inv.id),
+        cliente_id: custObj?.id || null,
+        cliente_nombre: custObj?.full_name || null,
+        cliente_numero: custObj?.c_number || null,
+        cliente_direccion: custObj?.address || null,
         monto_contado: monto,
         monto_credito: 0,
         monto_total: monto,
@@ -443,43 +472,49 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
 
     // Pagos a crédito del día
     for (const p of creditPayments) {
-      const inv = p.invoice_id ? invoiceMapFromPayments.get(p.invoice_id) : null;
-      const cust = inv?.customer_id ? customerMap.get(inv.customer_id) : null;
+      const invKey = paymentInvoiceKey ? String(p[paymentInvoiceKey]) : null;
+      const inv = invKey ? invoiceByNumber.get(invKey) : null;
+      const custObj = inv?.customer_id ? customerMap.get(inv.customer_id) : null;
+
       const amount = Number(p.amount) || 0;
       totalCredito += amount;
       totalGeneral += amount;
 
       detalles.push({
-        visita_id: p.id, // id del pago
-        cliente_id: cust?.id || null,
-        cliente_nombre: cust?.full_name || null,
-        cliente_numero: cust?.c_number || null,
-        cliente_direccion: cust?.address || null,
+        visita_id: p.id ? String(p.id) : (invKey || `${Math.random()}`),
+        cliente_id: custObj?.id || null,
+        cliente_nombre: custObj?.full_name || null,
+        cliente_numero: custObj?.c_number || null,
+        cliente_direccion: custObj?.address || null,
         monto_contado: 0,
         monto_credito: amount,
         monto_total: amount,
         tipo_pago: 'credito',
         observaciones: 'ABONO A CRÉDITO',
-        hora_visita: p.created_at,
+        hora_visita: p[paymentTimeField] || p.created_at || p.paid_at,
         fecha_visita: ymd
       });
     }
 
-    // Facturas de crédito saldadas ese día
+    // Facturas de crédito saldadas ese día (evitar doble conteo si ya hubo pagos contados arriba)
     for (const inv of creditSettledInvoices) {
+      const invNum = String(inv.invoice_number ?? inv.id);
+      if (paidInvoiceSet.has(invNum)) continue; // ya contada por pagos
+
       const amount = Number(inv.paid_amount) || 0;
       if (amount <= 0) continue;
+
       totalCredito += amount;
       totalGeneral += amount;
 
-      const cust = inv.customer_id ? customerMap.get(inv.customer_id) : null;
+      const custObj = inv.customer_id ? customerMap.get(inv.customer_id) : null;
 
       detalles.push({
-        visita_id: inv.id,
-        cliente_id: cust?.id || null,
-        cliente_nombre: cust?.full_name || null,
-        cliente_numero: cust?.c_number || null,
-        cliente_direccion: cust?.address || null,
+        visita_id: invNum,
+        cliente_id: custObj?.id || null,
+        cliente_nombre: custObj?.full_name || null,
+        cliente_numero: custObj?.c_number || null,
+        cliente_direccion: custObj?.address || null,
         monto_contado: 0,
         monto_credito: amount,
         monto_total: amount,
@@ -674,6 +709,7 @@ router.delete('/:id', async (req, res) => {
 });
 
 module.exports = router;
+
 
 
 
