@@ -18,12 +18,12 @@
     "mongoose": "^7.4.1",
     "multer": "^2.0.2",
     "mysql2": "^3.14.3",
+    "nodemailer": "^7.0.6",
     "nodemon": "^3.0.1",
     "sequelize": "^6.37.7"
   },
   "engines": {
-  "node": "20.x",
-  "npm": ">=8"
-}
-
+    "node": "20.x",
+    "npm": ">=8"
+  }
 }
