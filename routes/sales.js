@@ -183,18 +183,23 @@ router.delete('/deletesale/:invoice_number', async (req, res) => {
 });
 
 // ---------- REGISTRAR PAGO (ABONO) A CRÉDITO ----------
-// ---------- REGISTRAR PAGO (ABONO) A CRÉDITO ----------
 router.post('/invoices/pay/:invoice_number', async (req, res) => {
   const t = await sequelize.transaction();
   try {
     const { invoice_number } = req.params;
-    const { amount } = req.body;
+    const { amount, at } = req.body;
 
     const amt = Number(amount);
     if (!amt || amt <= 0) {
       await t.rollback();
       return res.status(400).json({ error: 'Monto inválido' });
     }
+
+    // Fecha del pago (permite forzar desde el cliente)
+    const payAt = (() => {
+      const d = at ? new Date(at) : new Date();
+      return isNaN(d.getTime()) ? new Date() : d;
+    })();
 
     // Bloqueo fila para evitar carreras
     const invoice = await Invoice.findByPk(invoice_number, {
@@ -206,13 +211,15 @@ router.post('/invoices/pay/:invoice_number', async (req, res) => {
       return res.status(404).json({ error: 'Factura no encontrada' });
     }
 
-    const method = String(invoice.payment_method || 'cash').toLowerCase();
+    // Usar payment_method para determinar si es crédito/contado
+    const method = String(invoice.payment_method || '').toLowerCase();
     if (method !== 'credit') {
       await t.rollback();
       return res.status(400).json({ error: 'La factura no es a crédito' });
     }
 
-    const absTotal = Math.abs(Number(invoice.total) || 0);
+    const rawTotal = Number(invoice.total) || 0;      // puede venir negativo en crédito
+    const absTotal = Math.abs(rawTotal);              // referencia positiva
     const alreadyPaid = Number(invoice.paid_amount || 0);
     const currentBalance = Math.max(absTotal - alreadyPaid, 0);
 
@@ -228,45 +235,59 @@ router.post('/invoices/pay/:invoice_number', async (req, res) => {
     // Nuevo acumulado
     const newPaid = alreadyPaid + amt;
     const newBalance = Math.max(absTotal - newPaid, 0);
-    const now = new Date();
 
     // Si existe la tabla/Modelo Payment, registramos el abono
     try {
       if (Payment) {
-        const paymentPayload = { amount: amt, created_at: now };
+        const paymentPayload = {
+          amount: amt,
+          created_at: payAt, // fecha del pago
+        };
 
-        // Intentar mapear claves posibles sin romper si no existen
+        // Mapear posibles FKs sin romper si no existen
         if (Payment.rawAttributes?.invoice_id) {
-          paymentPayload.invoice_id = invoice.invoice_number; // o invoice.id si tu FK apunta al ID
+          // Si tu FK es ID numérico, ajusta según tu modelo (invoice.id vs invoice.invoice_number)
+          paymentPayload.invoice_id = invoice.invoice_number;
         } else if (Payment.rawAttributes?.invoice_number) {
           paymentPayload.invoice_number = invoice.invoice_number;
         }
         if (Payment.rawAttributes?.seller_id) {
           paymentPayload.seller_id = invoice.vendedor_id || invoice.seller_id || null;
         }
+        if (Payment.rawAttributes?.paid_at) {
+          paymentPayload.paid_at = payAt;
+        }
 
         await Payment.create(paymentPayload, { transaction: t });
       }
     } catch (e) {
-      // Si falla registrar el Payment, no rompemos la transacción de la factura
+      // No romper la transacción principal si falla el insert en Payments
       console.warn('[invoices/pay] No se pudo registrar Payment:', e?.message);
     }
 
-    // Armar campos a actualizar en Invoice
-    const updates = { paid_amount: newPaid };
+    // Campos a actualizar en Invoice
+    const updates = {
+      paid_amount: newPaid,
+    };
 
-    // Si la factura quedó totalmente pagada, setear paid_at
-    if (newBalance === 0) {
-      updates.paid_at = now;
-    }
-
-    // Si tu tabla tiene columna 'balance', actualízala también
+    // Actualiza balance si existe la columna
     if (Invoice.rawAttributes?.balance) {
       updates.balance = newBalance;
     }
 
-    await invoice.update(updates, { transaction: t });
+    // Si quedó totalmente pagada:
+    if (newBalance === 0) {
+      // Marca fecha de pago
+      updates.paid_at = payAt;
 
+      // *** Requisito: si es CRÉDITO, poner total en positivo ***
+      // (aunque ya fuese positivo, esto asegura el valor correcto en BD)
+      if (method === 'credit') {
+        updates.total = absTotal;
+      }
+    }
+
+    await invoice.update(updates, { transaction: t });
     await t.commit();
 
     return res.json({
@@ -274,18 +295,16 @@ router.post('/invoices/pay/:invoice_number', async (req, res) => {
       invoice: {
         invoice_number: invoice.invoice_number,
         customer_name: invoice.customer_name,
-        payment_method: invoice.payment_method,
-        total: absTotal,
+        payment_method: invoice.payment_method, // 'credit' | 'cash'
+        // Siempre devolvemos total en positivo para la UI
+        total: (newBalance === 0 && method === 'credit') ? absTotal : Math.abs(Number(invoice.total) || 0),
         paid_amount: newPaid,
         balance: newBalance,
-        // útil para UI:
-        total_restante: newBalance,
-        // fecha del último abono (aunque no esté saldada)
-        last_payment_at: now.toISOString(),
-        // si quedó saldada, también devolvemos paid_at
-        paid_at: newBalance === 0 ? now.toISOString() : (invoice.paid_at || null),
+        total_restante: newBalance, // alias útil para front
+        last_payment_at: payAt.toISOString(),
+        paid_at: newBalance === 0 ? payAt.toISOString() : (invoice.paid_at || null),
         date_time: invoice.date_time,
-        vendedor_id: invoice.vendedor_id
+        vendedor_id: invoice.vendedor_id || invoice.seller_id || null,
       }
     });
   } catch (error) {
