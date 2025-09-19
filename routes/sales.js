@@ -1,16 +1,79 @@
 // routes/invoices.js
+'use strict';
+
 const express = require('express');
 const router = express.Router();
 const { validationResult } = require('express-validator');
 const { sequelize } = require('../db');
-const Invoice = require('../models/Invoice');
-const { QueryTypes } = require('sequelize');
+const { QueryTypes, literal } = require('sequelize');
+const nodemailer = require('nodemailer');
 
-// ---------- LISTAR TODAS ----------
-router.get('/fetchallsales', async (req, res) => {
+// MODELOS
+const Invoice = require('../models/Invoice'); // PK: invoice_number
+let ProductSale = null; // tabla de detalle de productos vendidos
+try {
+  // Usa el que tengas disponible
+  ProductSale = require('../models/ProductSale');     // singular
+} catch (_e1) {
+  try {
+    ProductSale = require('../models/ProductSales');  // plural
+  } catch (_e2) {
+    console.warn('[invoices] Modelo ProductSale/ProductSales no disponible. Se omitirá el guardado de detalle.');
+  }
+}
+
+let Payment = null;
+try {
+  Payment = require('../models/Payment');
+} catch {
+  console.warn('[invoices] Modelo Payment no disponible (solo afecta /invoices/pay).');
+}
+
+let Vendedor = null;
+try {
+  Vendedor = require('../models/Vendedor');
+} catch {
+  console.warn('[invoices] Modelo Vendedor no disponible; el email usará solo vendedor_id.');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+function ymdLocal(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+function absNum(n) {
+  const v = Number(n) || 0;
+  return Math.abs(v);
+}
+function safeDate(value, fallback = new Date()) {
+  const d = value ? new Date(value) : fallback;
+  return Number.isNaN(d.getTime()) ? fallback : d;
+}
+
+// Config de correo (usar variables de entorno)
+const mailFrom = process.env.MAIL_FROM || process.env.SMTP_USER || 'no-reply@example.com';
+const mailTo   = process.env.SALES_TO || process.env.MAIL_TO || 'ventas@example.com';
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST || 'smtp.gmail.com',
+  port: Number(process.env.SMTP_PORT || 587),
+  secure: String(process.env.SMTP_SECURE || 'false') === 'true',
+  auth: (process.env.SMTP_USER && process.env.SMTP_PASS) ? {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS
+  } : undefined,
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LISTAR TODAS
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/fetchallsales', async (_req, res) => {
   try {
     await sequelize.authenticate();
-    const invoices = await Invoice.findAll({ order: [['date_time', 'DESC']] });
+    const invoices = await Invoice.findAll({ order: [['date_time', ' DESC']] });
     res.json(invoices);
   } catch (error) {
     console.error('❌ fetchallsales:', error);
@@ -18,7 +81,9 @@ router.get('/fetchallsales', async (req, res) => {
   }
 });
 
-// ---------- FACTURAS POR VENDEDOR (usa vendedor_id) ----------
+// ─────────────────────────────────────────────────────────────────────────────
+// FACTURAS POR VENDEDOR (usa vendedor_id)
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/invoices/seller/:vendedorId', async (req, res) => {
   try {
     const { vendedorId } = req.params;
@@ -27,9 +92,7 @@ router.get('/invoices/seller/:vendedorId', async (req, res) => {
       where: { vendedor_id: vendedorId },
       attributes: {
         include: [
-          // total absoluto por si guardas negativos para crédito
           [sequelize.literal('ABS(total)'), 'abs_total'],
-          // balance solo aplica a crédito
           [
             sequelize.literal(
               "CASE WHEN LOWER(COALESCE(payment_method,''))='credit' " +
@@ -47,7 +110,7 @@ router.get('/invoices/seller/:vendedorId', async (req, res) => {
     const normalized = rows.map(r => ({
       ...r,
       total: Number(r.abs_total ?? r.total ?? 0),
-      balance: Number(r.balance ?? 0)
+      balance: Number(r.balance ?? 0),
     }));
 
     res.json({ success: true, data: normalized });
@@ -57,7 +120,19 @@ router.get('/invoices/seller/:vendedorId', async (req, res) => {
   }
 });
 
-// ---------- CREAR ----------
+// ─────────────────────────────────────────────────────────────────────────────
+// CREAR FACTURA
+//  - Guarda payment_method ('cash' | 'credit')
+//  - Guarda paid_at (si es contado se marca fecha de pago, si es crédito queda null)
+//  - Guarda detalle en ProductSales (si el modelo existe)
+//  - Envía correo con: vendedor, monto, tipo (crédito/contado), cliente, fecha, zona
+// Body esperado (flexible en items):
+// {
+//   invoice_number, date_time, customer_name, total, cash, change,
+//   vendedor_id, payment_method, customer_id?, zona?,
+//   items|products|cartItems: [ { product_id|id, product_name|name|title, quantity|qty|cantidad, price|unit_price|precio, subtotal? } ]
+// }
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/addsale', async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -69,13 +144,15 @@ router.post('/addsale', async (req, res) => {
 
     const {
       invoice_number,
-      date_time,
+      date_time,         // ISO string
+      customer_id,
       customer_name,
       total,
       cash,
       change,
-      vendedor_id,     // 👈 ahora este
-      payment_method   // opcional: 'cash' | 'credit'
+      vendedor_id,
+      payment_method,    // 'cash' | 'credit'
+      zona               // opcional
     } = req.body;
 
     if (
@@ -86,22 +163,143 @@ router.post('/addsale', async (req, res) => {
       return res.status(400).json({ error: 'Faltan campos requeridos' });
     }
 
-    const method = (payment_method || 'cash').toLowerCase();
+    const method = String(payment_method || 'cash').toLowerCase();
+    const dt = safeDate(date_time);
+    const absTotal = absNum(total);
 
+    // Si es contado, se paga completo en el acto
+    const paidAmount = method === 'cash' ? absTotal : 0;
+    const paidAt     = method === 'cash' ? dt : null;
+
+    // Si la tabla tiene 'balance', lo calculamos para crédito
+    const updatesIfHave = {};
+    if (Invoice.rawAttributes?.balance) {
+      updatesIfHave.balance = method === 'credit' ? Math.max(absTotal - paidAmount, 0) : 0;
+    }
+
+    // Crear la factura
     const invoice = await Invoice.create({
       invoice_number,
-      date_time,
+      date_time: dt,
+      customer_id: customer_id ?? null,
       customer_name,
-      total,
+      total,                    // puede venir negativo para crédito; mantenemos lo que manda el POS
       cash,
       change,
       vendedor_id: vendedor_id ?? null,
-      payment_method: method,
-      paid_amount:  method === 'cash' ? Math.abs(total) : 0
+      payment_method: method,   // guardamos el método
+      paid_amount: paidAmount,  // contado=total, crédito=0
+      paid_at: paidAt,          // fecha del pago (solo contado)
+      zona: zona ?? null,       // si existe la columna, Sequelize lo ignorará si no existe
+      ...updatesIfHave
     }, { transaction: t });
 
+    // Guardar detalle de productos (si hay items y existe el modelo)
+    const rawItems = Array.isArray(req.body.items)
+      ? req.body.items
+      : Array.isArray(req.body.products)
+        ? req.body.products
+        : Array.isArray(req.body.cartItems)
+          ? req.body.cartItems
+          : [];
+
+    if (ProductSale && rawItems.length > 0) {
+      // Detectar FK que espera el modelo
+      const fkInvoiceId =
+        ProductSale.rawAttributes?.invoice_number ? 'invoice_number'
+        : ProductSale.rawAttributes?.invoice_id ? 'invoice_id'
+        : null;
+
+      const commonCols = {
+        // agrega vendedor/cliente si tu tabla los tiene
+        ...(ProductSale.rawAttributes?.vendedor_id ? { vendedor_id: vendedor_id ?? null } : {}),
+        ...(ProductSale.rawAttributes?.customer_id ? { customer_id: customer_id ?? null } : {})
+      };
+
+      const rows = rawItems.map((it, idx) => {
+        const product_id   = it.product_id ?? it.id ?? null;
+        const product_name = it.product_name ?? it.name ?? it.title ?? '';
+        const quantity     = Number(it.quantity ?? it.qty ?? it.cantidad ?? 1);
+        const unit_price   = Number(it.price ?? it.unit_price ?? it.precio ?? 0);
+        const subtotal     = it.subtotal != null ? Number(it.subtotal) : Number((unit_price * quantity).toFixed(2));
+
+        const base = {
+          product_id,
+          product_name,
+          quantity,
+          unit_price,
+          subtotal,
+          line_number: (idx + 1),
+          ...commonCols
+        };
+
+        if (fkInvoiceId === 'invoice_number') base.invoice_number = invoice_number;
+        else if (fkInvoiceId === 'invoice_id') base.invoice_id = invoice_number; // ajusta si tu FK apunta al ID interno
+
+        return base;
+      });
+
+      // Filtra columnas inexistentes para no romper con modelos minimalistas
+      const allowed = Object.keys(ProductSale.rawAttributes);
+      const sanitizedRows = rows.map(r => {
+        const out = {};
+        for (const k of Object.keys(r)) {
+          if (allowed.includes(k)) out[k] = r[k];
+        }
+        return out;
+      });
+
+      if (sanitizedRows.length > 0) {
+        await ProductSale.bulkCreate(sanitizedRows, { transaction: t });
+      }
+    }
+
     await t.commit();
-    res.status(201).json(invoice);
+
+    // ── Email (después del commit; si falla, no afecta la venta) ────────────
+    (async () => {
+      try {
+        let vendedorNombre = vendedor_id ? `ID ${vendedor_id}` : 'Sin vendedor';
+        let vendedorZona   = zona || null;
+        if (Vendedor && vendedor_id) {
+          const v = await Vendedor.findByPk(vendedor_id);
+          if (v) {
+            vendedorNombre = v.nombre || vendedorNombre;
+            vendedorZona   = v.zona || vendedorZona;
+          }
+        }
+
+        if (!transporter) return;
+
+        const tipo = method === 'credit' ? 'CRÉDITO' : 'CONTADO';
+        const fechaVenta = dt.toLocaleString('es-DO');
+        const asunto = `Nueva venta #${invoice_number} — ${tipo} — RD$ ${absTotal.toFixed(2)}`;
+        const html = `
+          <div style="font-family:Arial,Helvetica,sans-serif">
+            <h3>Nueva venta registrada</h3>
+            <ul>
+              <li><b>Factura:</b> ${invoice_number}</li>
+              <li><b>Fecha:</b> ${fechaVenta}</li>
+              <li><b>Cliente:</b> ${customer_name}</li>
+              <li><b>Monto:</b> RD$ ${absTotal.toFixed(2)}</li>
+              <li><b>Método:</b> ${tipo}</li>
+              <li><b>Vendedor:</b> ${vendedorNombre}</li>
+              <li><b>Zona:</b> ${vendedorZona ?? '—'}</li>
+            </ul>
+          </div>
+        `;
+        await transporter.sendMail({
+          from: mailFrom,
+          to: mailTo,
+          subject: asunto,
+          html
+        });
+      } catch (e) {
+        console.warn('[addsale] No se pudo enviar correo:', e?.message);
+      }
+    })();
+
+    res.status(201).json({ success: true, invoice });
   } catch (error) {
     if (t.finished !== 'commit') await t.rollback();
     if (error.name === 'SequelizeUniqueConstraintError') {
@@ -112,7 +310,9 @@ router.post('/addsale', async (req, res) => {
   }
 });
 
-// ---------- OBTENER POR invoice_number ----------
+// ─────────────────────────────────────────────────────────────────────────────
+// OBTENER POR invoice_number
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/getsale/:invoice_number', async (req, res) => {
   try {
     const invoice = await Invoice.findByPk(req.params.invoice_number);
@@ -124,7 +324,10 @@ router.get('/getsale/:invoice_number', async (req, res) => {
   }
 });
 
-// ---------- ACTUALIZAR POR invoice_number ----------
+// ─────────────────────────────────────────────────────────────────────────────
+// ACTUALIZAR POR invoice_number
+//  - si envías payment_method/paid_amount/paid_at también se actualizan
+// ─────────────────────────────────────────────────────────────────────────────
 router.put('/updatesale/:invoice_number', async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -136,7 +339,7 @@ router.put('/updatesale/:invoice_number', async (req, res) => {
 
     const {
       date_time, customer_name, total, cash, change,
-      vendedor_id, payment_method, paid_amount
+      vendedor_id, payment_method, paid_amount, paid_at
     } = req.body;
 
     if (
@@ -147,13 +350,28 @@ router.put('/updatesale/:invoice_number', async (req, res) => {
       return res.status(400).json({ error: 'Faltan campos requeridos' });
     }
 
-    await invoice.update({
-      date_time, customer_name, total, cash, change,
+    const updates = {
+      date_time: safeDate(date_time),
+      customer_name,
+      total,
+      cash,
+      change,
       vendedor_id: vendedor_id ?? invoice.vendedor_id,
       payment_method: payment_method ?? invoice.payment_method,
       paid_amount: paid_amount ?? invoice.paid_amount
-    }, { transaction: t });
+    };
 
+    if (paid_at !== undefined) updates.paid_at = paid_at ? safeDate(paid_at) : null;
+
+    // balance si existe
+    if (Invoice.rawAttributes?.balance) {
+      const method = String(updates.payment_method || '').toLowerCase();
+      const absTotal = absNum(updates.total);
+      const paid = Number(updates.paid_amount || 0);
+      updates.balance = method === 'credit' ? Math.max(absTotal - paid, 0) : 0;
+    }
+
+    await invoice.update(updates, { transaction: t });
     await t.commit();
     res.json(invoice);
   } catch (error) {
@@ -163,7 +381,9 @@ router.put('/updatesale/:invoice_number', async (req, res) => {
   }
 });
 
-// ---------- ELIMINAR POR invoice_number ----------
+// ─────────────────────────────────────────────────────────────────────────────
+// ELIMINAR POR invoice_number
+// ─────────────────────────────────────────────────────────────────────────────
 router.delete('/deletesale/:invoice_number', async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -182,7 +402,10 @@ router.delete('/deletesale/:invoice_number', async (req, res) => {
   }
 });
 
-// ---------- REGISTRAR PAGO (ABONO) A CRÉDITO ----------
+// ─────────────────────────────────────────────────────────────────────────────
+// REGISTRAR PAGO (ABONO) A CRÉDITO
+//  - Ajustado para mantener consistencia con el backend previo
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/invoices/pay/:invoice_number', async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -195,13 +418,8 @@ router.post('/invoices/pay/:invoice_number', async (req, res) => {
       return res.status(400).json({ error: 'Monto inválido' });
     }
 
-    // Fecha del pago (permite forzar desde el cliente)
-    const payAt = (() => {
-      const d = at ? new Date(at) : new Date();
-      return isNaN(d.getTime()) ? new Date() : d;
-    })();
+    const payAt = safeDate(at, new Date());
 
-    // Bloqueo fila para evitar carreras
     const invoice = await Invoice.findByPk(invoice_number, {
       transaction: t,
       lock: t.LOCK.UPDATE
@@ -211,15 +429,14 @@ router.post('/invoices/pay/:invoice_number', async (req, res) => {
       return res.status(404).json({ error: 'Factura no encontrada' });
     }
 
-    // Usar payment_method para determinar si es crédito/contado
     const method = String(invoice.payment_method || '').toLowerCase();
     if (method !== 'credit') {
       await t.rollback();
       return res.status(400).json({ error: 'La factura no es a crédito' });
     }
 
-    const rawTotal = Number(invoice.total) || 0;      // puede venir negativo en crédito
-    const absTotal = Math.abs(rawTotal);              // referencia positiva
+    const rawTotal = Number(invoice.total) || 0;
+    const absTotal = Math.abs(rawTotal);
     const alreadyPaid = Number(invoice.paid_amount || 0);
     const currentBalance = Math.max(absTotal - alreadyPaid, 0);
 
@@ -232,59 +449,33 @@ router.post('/invoices/pay/:invoice_number', async (req, res) => {
       return res.status(400).json({ error: 'El abono excede el balance' });
     }
 
-    // Nuevo acumulado
-    const newPaid = alreadyPaid + amt;
-    const newBalance = Math.max(absTotal - newPaid, 0);
-
-    // Si existe la tabla/Modelo Payment, registramos el abono
+    // Registrar en Payments (si existe)
     try {
       if (Payment) {
-        const paymentPayload = {
+        const payload = {
           amount: amt,
-          created_at: payAt, // fecha del pago
         };
+        if (Payment.rawAttributes?.created_at) payload.created_at = payAt;
+        if (Payment.rawAttributes?.paid_at)     payload.paid_at     = payAt;
+        if (Payment.rawAttributes?.invoice_id)  payload.invoice_id  = invoice.invoice_number;
+        if (Payment.rawAttributes?.invoice_number) payload.invoice_number = invoice.invoice_number;
+        if (Payment.rawAttributes?.vendedor_id) payload.vendedor_id = invoice.vendedor_id ?? null;
+        if (Payment.rawAttributes?.seller_id)   payload.seller_id   = invoice.vendedor_id ?? null;
 
-        // Mapear posibles FKs sin romper si no existen
-        if (Payment.rawAttributes?.invoice_id) {
-          // Si tu FK es ID numérico, ajusta según tu modelo (invoice.id vs invoice.invoice_number)
-          paymentPayload.invoice_id = invoice.invoice_number;
-        } else if (Payment.rawAttributes?.invoice_number) {
-          paymentPayload.invoice_number = invoice.invoice_number;
-        }
-        if (Payment.rawAttributes?.seller_id) {
-          paymentPayload.seller_id = invoice.vendedor_id || invoice.seller_id || null;
-        }
-        if (Payment.rawAttributes?.paid_at) {
-          paymentPayload.paid_at = payAt;
-        }
-
-        await Payment.create(paymentPayload, { transaction: t });
+        await Payment.create(payload, { transaction: t });
       }
     } catch (e) {
-      // No romper la transacción principal si falla el insert en Payments
       console.warn('[invoices/pay] No se pudo registrar Payment:', e?.message);
     }
 
-    // Campos a actualizar en Invoice
-    const updates = {
-      paid_amount: newPaid,
-    };
+    const newPaid = alreadyPaid + amt;
+    const newBalance = Math.max(absTotal - newPaid, 0);
 
-    // Actualiza balance si existe la columna
-    if (Invoice.rawAttributes?.balance) {
-      updates.balance = newBalance;
-    }
-
-    // Si quedó totalmente pagada:
+    const updates = { paid_amount: newPaid };
+    if (Invoice.rawAttributes?.balance) updates.balance = newBalance;
     if (newBalance === 0) {
-      // Marca fecha de pago
       updates.paid_at = payAt;
-
-      // *** Requisito: si es CRÉDITO, poner total en positivo ***
-      // (aunque ya fuese positivo, esto asegura el valor correcto en BD)
-      if (method === 'credit') {
-        updates.total = absTotal;
-      }
+      if (method === 'credit') updates.total = absTotal; // poner en positivo
     }
 
     await invoice.update(updates, { transaction: t });
@@ -295,16 +486,15 @@ router.post('/invoices/pay/:invoice_number', async (req, res) => {
       invoice: {
         invoice_number: invoice.invoice_number,
         customer_name: invoice.customer_name,
-        payment_method: invoice.payment_method, // 'credit' | 'cash'
-        // Siempre devolvemos total en positivo para la UI
+        payment_method: invoice.payment_method,
         total: (newBalance === 0 && method === 'credit') ? absTotal : Math.abs(Number(invoice.total) || 0),
         paid_amount: newPaid,
         balance: newBalance,
-        total_restante: newBalance, // alias útil para front
+        total_restante: newBalance,
         last_payment_at: payAt.toISOString(),
         paid_at: newBalance === 0 ? payAt.toISOString() : (invoice.paid_at || null),
         date_time: invoice.date_time,
-        vendedor_id: invoice.vendedor_id || invoice.seller_id || null,
+        vendedor_id: invoice.vendedor_id ?? null
       }
     });
   } catch (error) {
@@ -314,7 +504,9 @@ router.post('/invoices/pay/:invoice_number', async (req, res) => {
   }
 });
 
-// ---------- ESTADÍSTICAS POR VENDEDOR (usa vendedor_id) ----------
+// ─────────────────────────────────────────────────────────────────────────────
+// ESTADÍSTICAS POR VENDEDOR
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/vendedor-stats', async (req, res) => {
   try {
     const { startDate, endDate } = req.body;
@@ -344,10 +536,9 @@ router.post('/vendedor-stats', async (req, res) => {
     res.json({ success: true, data });
   } catch (error) {
     console.error('❌ vendedor-stats:', error);
-    console.error('❌ vendedor-stats:', error);
-    console.error('❌ vendedor-stats:', error);
     res.status(500).json({ success: false, error: 'Error al obtener estadísticas de ventas', details: error.message });
   }
 });
 
 module.exports = router;
+
