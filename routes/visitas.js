@@ -10,10 +10,12 @@ const ResultadoVisita  = require('../models/ResultadoVisita');
 const Vendedor         = require('../models/Vendedor');
 const Customer         = require('../models/Customer');
 
-// ⚠️ Estos dos se cargan en try/catch para no romper si faltan.
-// Para /cobros solo usamos Invoice.
+// ⚠️ Modelos opcionales
 let Invoice = null;
 let Payment = null;
+// Modelo opcional para capacitación (si existe)
+let TrainingVideo = null;
+
 try {
   // Debe exponer: vendedor_id/seller_id, customer_id, invoice_number, date_time, total, payment_method
   Invoice = require('../models/Invoice');
@@ -24,6 +26,12 @@ try {
   Payment = require('../models/Payment');
 } catch (_) {
   console.warn('[visitas] Modelo Payment no disponible');
+}
+try {
+  // Estructura sugerida: id, titulo (string), url (string), orden (int opcional), created_at/updated_at
+  TrainingVideo = require('../models/TrainingVideo');
+} catch (_) {
+  console.warn('[visitas] Modelo TrainingVideo no disponible (se usará respuesta de ejemplo)');
 }
 
 /* ===================== *
@@ -65,6 +73,50 @@ const COMMON_INCLUDE = [
   { model: Vendedor,  as: 'vendedor', attributes: ['id','nombre'] },
   { model: ResultadoVisita, as: 'resultado', required: false },
 ];
+
+/* ========================================================= *
+ * NUEVA RUTA: Capacitación                                  *
+ * Devuelve un array plano: [{ id, titulo, url }, ...]       *
+ * URL: GET /api/visitas/capacitacion                        *
+ * ========================================================= */
+router.get('/capacitacion', async (_req, res) => {
+  try {
+    // Si hay modelo en BD, usarlo
+    if (TrainingVideo) {
+      const rows = await TrainingVideo.findAll({
+        attributes: ['id', 'titulo', 'url', 'orden', 'created_at', 'updated_at'].filter(Boolean),
+        order: [['orden', 'ASC'], ['id', 'ASC']],
+      });
+
+      const list = rows.map((r, i) => ({
+        id: r.id ?? i + 1,
+        titulo: r.titulo ?? `Video ${i + 1}`,
+        url: r.url ?? '',
+      }));
+
+      return res.json(list); // <-- arreglo directo (no { success, data })
+    }
+
+    // Fallback sin modelo (ejemplos)
+    const fallback = [
+      {
+        id: 1,
+        titulo: 'Cómo hacer un pedido',
+        url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+      },
+      {
+        id: 2,
+        titulo: 'Cómo cobrar una factura',
+        url: 'https://youtu.be/9bZkp7q19f0',
+      },
+    ];
+    return res.json(fallback); // <-- arreglo directo
+  } catch (e) {
+    console.error('GET /visitas/capacitacion ERROR =>', e);
+    // En error, responde arreglo vacío (el front lo soporta)
+    return res.status(200).json([]);
+  }
+});
 
 /* ============================= *
  * 1) Planificar una visita      *
@@ -308,9 +360,6 @@ router.get('/historial/:vendedorId', async (req, res) => {
 
 /* ========================================================= *
  * 7) Cobros por día (VENTAS reales por facturas con total>0)
- *    - Busca en invoices del vendedor con DATE(date_time)=fecha
- *    - Solo cuenta total > 0
- *    - Separa por contado vs crédito según payment_method
  * ========================================================= */
 router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
   try {
@@ -353,7 +402,6 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
     }
 
     // Traer TODAS las facturas del vendedor con total > 0 en la FECHA enviada
-    // Usamos DATE(date_time)='YYYY-MM-DD' como solicitaste.
     const invoices = await Invoice.findAll({
       where: literal(`
         ${sellerCol}=${Number(vendedorId)}
@@ -363,7 +411,7 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
       order: [['date_time','ASC']]
     });
 
-    // Hidratar clientes (opcional; mostrará nombre/dir si existe customer_id)
+    // Hidratar clientes
     const customerIds = new Set();
     for (const inv of invoices) if (inv.customer_id) customerIds.add(inv.customer_id);
 
@@ -520,9 +568,6 @@ router.get('/dia/:fecha', async (req, res) => {
 });
 
 // LIST: rango y filtros
-// ?estado=pendiente|realizada|en_curso|all (default all -> pendiente+realizada)
-// ?date=YYYY-MM-DD (atajo: from=to) | ?from=YYYY-MM-DD&to=YYYY-MM-DD
-// ?vendedor_id= &customer_id=
 router.get('/list', async (req, res) => {
   try {
     const today = todayYMDLocal();
@@ -587,3 +632,4 @@ router.delete('/:id', async (req, res) => {
 });
 
 module.exports = router;
+
