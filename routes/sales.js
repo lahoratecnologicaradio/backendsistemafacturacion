@@ -224,7 +224,7 @@ router.post('/addsale', async (req, res) => {
       const rows = rawItems.map((it, idx) => {
         const product_id   = it.product_id ?? it.id ?? null;
         const product_name = it.product_name ?? it.name ?? it.title ?? '';
-        the const quantity     = Number(it.quantity ?? it.qty ?? it.cantidad ?? 1);
+        const quantity     = Number(it.quantity ?? it.qty ?? it.cantidad ?? 1);
         const unit_price   = Number(it.price ?? it.unit_price ?? it.precio ?? 0);
         const subtotal     = it.subtotal != null ? Number(it.subtotal) : Number((unit_price * quantity).toFixed(2));
 
