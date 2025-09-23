@@ -94,6 +94,30 @@ const COMMON_INCLUDE = [
 ];
 
 /* ========================================================= *
+ *  Helpers de Zona Horaria para cobros (MySQL/MariaDB)      *
+ * ========================================================= */
+
+// Config TZ RD
+const RD_TZ = 'America/Santo_Domingo';
+const RD_OFFSET = '-04:00'; // fallback si no hay tablas de zona horaria
+
+/**
+ * Genera una expresión SQL que compara solo la FECHA local RD de una columna datetime/timestamp
+ * Soporta dos modos:
+ *  - Si el servidor tiene tablas de tz: CONVERT_TZ(..., @@session.time_zone, 'America/Santo_Domingo')
+ *  - Fallback con offset: CONVERT_TZ(..., '+00:00', '-04:00')
+ */
+const dateLocalEquals = (col, ymd) => literal(
+  `(
+    (CASE 
+       WHEN CONVERT_TZ('2000-01-01 00:00:00','UTC','${RD_TZ}') IS NOT NULL 
+       THEN DATE(CONVERT_TZ(${col}, @@session.time_zone, '${RD_TZ}'))
+       ELSE DATE(CONVERT_TZ(${col}, '+00:00', '${RD_OFFSET}'))
+     END) = '${ymd}'
+   )`
+);
+
+/* ========================================================= *
  * NUEVAS RUTAS: Capacitación                                *
  * ========================================================= */
 
@@ -121,7 +145,7 @@ router.get('/capacitacion', async (_req, res) => {
     // Fallback sin modelo (ejemplos)
     const fallback = [
       { id: 1, titulo: 'Cómo hacer un pedido', url: 'https://youtu.be/O-rhnxV6qRc?si=DaUcwAFPCrZHTsvJ', orden: 1, is_active: 1 },
-      { id: 2, titulo: 'Cómo cobrar una factura', url: 'https://youtu.be/O-rhnxV6qRc?si=DaUcwAFPCrZHTsvJ', orden: 2, is_active: 1 },
+      { id: 2, titulo: 'Cómo cobrar una factura', url: 'https://youtube.com/shorts/rzsKc3G9wvs?si=6CuOtSJbd4Pk1jSu', orden: 2, is_active: 1 },
     ];
     return res.json(fallback);
   } catch (e) {
@@ -336,7 +360,7 @@ router.post('/registrar-resultado', async (req, res) => {
 
     let visita = null;
 
-    if (visita_id) {
+    if (v isita_id) {
       visita = await VisitaProgramada.findByPk(visita_id);
       if (!visita) return res.status(404).json({ success: false, message: 'Visita no encontrada' });
     } else if (vendedor_id && customer_id) {
@@ -412,10 +436,10 @@ router.get('/historial/:vendedorId', async (req, res) => {
 });
 
 /* ========================================================= *
- * 7) Cobros por día (TODO lo cobrado = paid_amount del día) *
+ * 7) Cobros por día (lo cobrado = paid_amount del día RD)   *
  *    Une sin doble conteo:
- *      A) DATE(date_time)=YYYY-MM-DD y paid_amount>0
- *      B) DATE(paid_at)  =YYYY-MM-DD y paid_amount>0
+ *      A) FECHA LOCAL RD de date_time y paid_amount>0
+ *      B) FECHA LOCAL RD de paid_at    y paid_amount>0
  *    Monto por detalle = paid_amount; método según payment_method
  * ========================================================= */
 router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
@@ -458,23 +482,27 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
       return res.status(500).json({ success: false, message: 'La tabla invoices no tiene vendedor_id/seller_id' });
     }
 
-    // A) Facturas con date_time = día y paid_amount > 0
+    // === A) Facturas con FECHA LOCAL RD de date_time y paid_amount > 0
     const invByDateTime = await Invoice.findAll({
-      where: literal(`
-        ${sellerCol}=${Number(vendedorId)}
-        AND COALESCE(paid_amount,0) > 0
-        AND DATE(date_time)='${ymd}'
-      `),
+      where: {
+        [Op.and]: [
+          literal(`${sellerCol} = ${Number(vendedorId)}`),
+          literal(`COALESCE(paid_amount,0) > 0`),
+          dateLocalEquals('date_time', ymd)
+        ]
+      },
       order: [['date_time','ASC']]
     });
 
-    // B) Facturas con paid_at = día y paid_amount > 0
+    // === B) Facturas con FECHA LOCAL RD de paid_at y paid_amount > 0
     const invByPaidAt = await Invoice.findAll({
-      where: literal(`
-        ${sellerCol}=${Number(vendedorId)}
-        AND COALESCE(paid_amount,0) > 0
-        AND DATE(paid_at)='${ymd}'
-      `),
+      where: {
+        [Op.and]: [
+          literal(`${sellerCol} = ${Number(vendedorId)}`),
+          literal(`COALESCE(paid_amount,0) > 0`),
+          dateLocalEquals('paid_at', ymd)
+        ]
+      },
       order: [['paid_at','ASC']]
     });
 
@@ -528,13 +556,13 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
         monto_total: amt,
         tipo_pago: esContado ? 'contado' : 'credito',
         observaciones: 'COBRO (paid_amount)',
-        // Hora de referencia para ordenar
+        // Hora de referencia para ordenar (guardamos el crudo)
         hora_visita: inv.paid_at || inv.date_time,
         fecha_visita: ymd
       });
     }
 
-    // Orden cronológico
+    // Orden cronológico por timestamp crudo
     detalles.sort((a, b) => {
       const ta = new Date(a.hora_visita).getTime() || 0;
       const tb = new Date(b.hora_visita).getTime() || 0;
@@ -546,6 +574,10 @@ router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
       success: true,
       fecha: ymd,
       vendedor: { id: vendedor.id, nombre: vendedor.nombre },
+      tz_mode: {
+        region: RD_TZ,
+        fallback_offset_used: false // no podemos detectarlo sin ejecutar un SELECT; dejar fijo u opcional
+      },
       resumen_cobros: {
         total_contado: totalContado.toFixed(2),
         total_credito: totalCredito.toFixed(2),
