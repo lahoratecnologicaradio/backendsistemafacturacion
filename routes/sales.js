@@ -164,6 +164,9 @@ router.get('/invoices/seller/:vendedorId', async (req, res) => {
 //   ]
 // }
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// CREAR FACTURA + actualizar qty + email
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/addsale', async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -198,36 +201,33 @@ router.post('/addsale', async (req, res) => {
     const dt = safeDate(date_time);
     const absTotal = absNum(total);
 
-    // Si es contado, se paga completo en el acto
+    // contado => pagado completo
     const paidAmount = method === 'cash' ? absTotal : 0;
     const paidAt     = method === 'cash' ? dt : null;
 
-    // Si la tabla tiene 'balance', lo calculamos para crédito
     const updatesIfHave = {};
     if (Invoice.rawAttributes?.balance) {
       updatesIfHave.balance = method === 'credit' ? Math.max(absTotal - paidAmount, 0) : 0;
     }
 
-    // Crear la factura
+    // 1) Crear factura
     const invoice = await Invoice.create({
       invoice_number,
       date_time: dt,
       customer_id: customer_id ?? null,
       customer_name,
-      total,                    // puede venir negativo para crédito; mantenemos lo que manda el POS
+      total,
       cash,
       change,
       vendedor_id: vendedor_id ?? null,
-      payment_method: method,   // guardamos el método
-      paid_amount: paidAmount,  // contado=total, crédito=0
-      paid_at: paidAt,          // fecha del pago (solo contado)
-      zona: zona ?? null,       // si existe la columna, Sequelize lo ignorará si no existe
+      payment_method: method,
+      paid_amount: paidAmount,
+      paid_at: paidAt,
+      zona: zona ?? null,
       ...updatesIfHave
     }, { transaction: t });
 
-    // -----------------------------
-    // Detalle de productos vendidos
-    // -----------------------------
+    // 2) Obtener items de la venta (admite varias claves)
     const rawItems = Array.isArray(req.body.items)
       ? req.body.items
       : Array.isArray(req.body.products)
@@ -236,10 +236,10 @@ router.post('/addsale', async (req, res) => {
           ? req.body.cartItems
           : [];
 
-    // Para el email (incluye qty antes/después)
+    // Guardaremos info para el correo
     const itemsWithQty = [];
 
-    // Guardar detalle (si el modelo existe)
+    // 3) Guardar detalle si el modelo existe
     if (ProductSale && rawItems.length > 0) {
       const fkInvoiceId =
         ProductSale.rawAttributes?.invoice_number ? 'invoice_number'
@@ -257,24 +257,16 @@ router.post('/addsale', async (req, res) => {
         const quantity     = Number(it.quantity ?? it.qty ?? it.cantidad ?? 1);
         const unit_price   = Number(it.price ?? it.unit_price ?? it.precio ?? 0);
         const subtotal     = it.subtotal != null ? Number(it.subtotal) : Number((unit_price * quantity).toFixed(2));
-
         const base = {
-          product_id,
-          product_name,
-          quantity,
-          unit_price,
-          subtotal,
+          product_id, product_name, quantity, unit_price, subtotal,
           line_number: (idx + 1),
           ...commonCols
         };
-
         if (fkInvoiceId === 'invoice_number') base.invoice_number = invoice_number;
         else if (fkInvoiceId === 'invoice_id') base.invoice_id = invoice_number;
-
         return base;
       });
 
-      // Filtrar columnas inexistentes
       const allowed = Object.keys(ProductSale.rawAttributes);
       const sanitizedRows = rows.map(r => {
         const out = {};
@@ -287,13 +279,11 @@ router.post('/addsale', async (req, res) => {
       }
     }
 
-    // -----------------------------
-    // Actualizar QTY (atómico en SQL) — SOLO usa 'qty'
-    // -----------------------------
+    // 4) Descontar **qty** del inventario (SOLO `qty`)
     if (!Product) {
-      console.warn('[sales/addsale] No hay modelo Product; saltando actualización de qty.');
-    } else if (!Product.rawAttributes?.[QTY_FIELD]) {
-      console.warn(`[sales/addsale] El modelo Product no tiene el campo '${QTY_FIELD}'.`);
+      console.warn('[sales/addsale] No hay modelo Product; se omite actualización de qty.');
+    } else if (!Product.rawAttributes?.qty) {
+      console.warn("[sales/addsale] El modelo Product no tiene el campo 'qty'. Revisa el modelo/DB.");
     } else {
       for (const it of rawItems) {
         const product_id   = it.product_id ?? it.productId ?? it.id ?? null;
@@ -310,33 +300,33 @@ router.post('/addsale', async (req, res) => {
         } else if (quantity <= 0) {
           console.warn(`[sales/addsale] Cantidad <= 0 para producto ${product_id}; no se descuenta qty.`);
         } else {
-          // 1) Leer qty actual (para el email)
+          // Leer qty actual (solo para mostrar en correo/log)
           const beforeRow = await Product.findByPk(product_id, {
-            attributes: ['id', 'product_name', QTY_FIELD],
+            attributes: ['id', 'product_name', 'qty'],
             transaction: t
           });
 
           if (!beforeRow) {
             console.warn(`[sales/addsale] Producto id=${product_id} no encontrado; no se actualiza qty.`);
           } else {
-            qtyBefore = Number(beforeRow.get(QTY_FIELD)) || 0;
+            qtyBefore = Number(beforeRow.get('qty')) || 0;
 
-            // 2) UPDATE atómico: qty = GREATEST(qty - :cantidad, 0)
+            // UPDATE portable: qty = CASE WHEN qty >= :by THEN qty - :by ELSE 0 END
+            // Usamos sequelize.literal para conservar updatedAt y hooks del modelo.
             const [affected] = await Product.update(
-              { [QTY_FIELD]: sequelize.literal(`GREATEST(${QTY_FIELD} - ${quantity}, 0)`) },
+              { qty: sequelize.literal(`CASE WHEN qty >= ${quantity} THEN qty - ${quantity} ELSE 0 END`) },
               { where: { id: product_id }, transaction: t }
             );
 
             if (affected === 0) {
-              console.warn(`[sales/addsale] UPDATE no afectó filas para id=${product_id}.`);
+              console.warn(`[sales/addsale] UPDATE no afectó filas (id=${product_id}). Verifica que exista y no esté soft-deleted.`);
             }
 
-            // 3) Leer qty actualizado
             const afterRow = await Product.findByPk(product_id, {
-              attributes: ['id', 'product_name', QTY_FIELD],
+              attributes: ['id', 'product_name', 'qty'],
               transaction: t
             });
-            qtyAfter = afterRow ? (Number(afterRow.get(QTY_FIELD)) || 0) : null;
+            qtyAfter = afterRow ? (Number(afterRow.get('qty')) || 0) : null;
 
             console.log(`[sales/addsale] Producto ${product_id} — qty: ${qtyBefore} -> ${qtyAfter} (venta: ${quantity})`);
           }
@@ -349,16 +339,15 @@ router.post('/addsale', async (req, res) => {
           unit_price,
           subtotal,
           qty_before: qtyBefore,
-          qty_after: qtyAfter,
-          low: (qtyAfter != null) ? (qtyAfter < LOW_STOCK_THRESHOLD) : false
+          qty_after: qtyAfter
         });
       }
     }
 
-    // Confirmar la transacción
+    // 5) Commit
     await t.commit();
 
-    // ── Email (después del commit; si falla, no afecta la venta) ────────────
+    // 6) Correo (no afecta la venta si falla)
     (async () => {
       try {
         let vendedorNombre = vendedor_id ? `ID ${vendedor_id}` : 'Sin vendedor';
@@ -383,20 +372,17 @@ router.post('/addsale', async (req, res) => {
           minimumFractionDigits: 2,
           maximumFractionDigits: 2,
         });
-
         const montoAsunto = formatoRD.format(absTotal);
         const asunto = `El vendedor ${vendedorNombre} ha realizado una venta ${tipoAsunto} al cliente ${customer_name} por un monto de ${montoAsunto}`;
 
-        // Tabla de productos para el correo (muestra qty antes/después)
         const rowsHtml = (itemsWithQty || []).map(it => {
-          const warn = it.low ? 'background:#ffebee;' : '';
           const price = formatoRD.format(Number(it.unit_price || 0));
           const sub   = formatoRD.format(Number(it.subtotal || 0));
           const before = (it.qty_before == null) ? '—' : it.qty_before.toLocaleString('es-DO');
           const after  = (it.qty_after  == null) ? '—' : it.qty_after.toLocaleString('es-DO');
 
           return `
-            <tr style="${warn}">
+            <tr>
               <td>${it.product_name}</td>
               <td style="text-align:right;">${Number(it.quantity || 0).toLocaleString('es-DO')}</td>
               <td style="text-align:right;">${price}</td>
@@ -406,35 +392,6 @@ router.post('/addsale', async (req, res) => {
             </tr>
           `;
         }).join('');
-
-        const lowAlerts = (itemsWithQty || [])
-          .filter(it => it.low)
-          .map(it => `<li><span style="color:#b71c1c;font-weight:700;">ALERTA:</span> El producto <b>${it.product_name}</b> está con <span style="color:#b71c1c;">stock bajo</span> (qty ${it.qty_after})</li>`)
-          .join('');
-
-        const htmlProductos = `
-          <h4 style="margin:16px 0 8px;">Detalle de productos</h4>
-          <table cellpadding="6" cellspacing="0" style="width:100%; border-collapse:collapse; font-size:13px;">
-            <thead>
-              <tr style="background:#f5f5f5;">
-                <th style="text-align:left;">Producto</th>
-                <th style="text-align:right;">Cant.</th>
-                <th style="text-align:right;">Precio</th>
-                <th style="text-align:right;">Subtotal</th>
-                <th style="text-align:right;">Qty antes</th>
-                <th style="text-align:right;">Qty después</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${rowsHtml || `<tr><td colspan="6" style="text-align:center;color:#777;">(Sin detalle)</td></tr>`}
-            </tbody>
-          </table>
-          ${lowAlerts ? `
-            <div style="margin-top:10px;">
-              <ul style="margin:8px 0 0 18px; padding:0;">${lowAlerts}</ul>
-            </div>
-          ` : ''}
-        `;
 
         const html = `
           <div style="font-family:Arial,Helvetica,sans-serif; color:#222;">
@@ -448,7 +405,22 @@ router.post('/addsale', async (req, res) => {
               <li><b>Vendedor:</b> ${vendedorNombre}</li>
               <li><b>Zona:</b> ${vendedorZona ?? '—'}</li>
             </ul>
-            ${htmlProductos}
+            <h4 style="margin:16px 0 8px;">Detalle de productos</h4>
+            <table cellpadding="6" cellspacing="0" style="width:100%; border-collapse:collapse; font-size:13px;">
+              <thead>
+                <tr style="background:#f5f5f5;">
+                  <th style="text-align:left;">Producto</th>
+                  <th style="text-align:right;">Cant.</th>
+                  <th style="text-align:right;">Precio</th>
+                  <th style="text-align:right;">Subtotal</th>
+                  <th style="text-align:right;">Qty antes</th>
+                  <th style="text-align:right;">Qty después</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rowsHtml || `<tr><td colspan="6" style="text-align:center;color:#777;">(Sin detalle)</td></tr>`}
+              </tbody>
+            </table>
           </div>
         `;
 
@@ -473,6 +445,7 @@ router.post('/addsale', async (req, res) => {
     res.status(500).json({ error: 'Error al crear factura', details: error.message });
   }
 });
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OBTENER POR invoice_number
