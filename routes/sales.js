@@ -77,8 +77,7 @@ const STOCK_FIELD = 'qty';
 const LOW_STOCK_THRESHOLD = Number(process.env.LOW_STOCK_THRESHOLD || 1000);
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Email / SMTP (usar variables de entorno) — configuración robusta TLS
-// ─────────────────────────────────────────────────────────────────────────────
+/** Email / SMTP (usar variables de entorno) — configuración robusta TLS */
 const mailFrom = process.env.MAIL_FROM || process.env.SMTP_USER || 'ventas@example.com';
 const mailTo   = process.env.SALES_TO || process.env.MAIL_TO || 'ventas@example.com';
 
@@ -289,7 +288,7 @@ router.post('/addsale', async (req, res) => {
     }
 
     // -----------------------------
-    // Actualizar STOCK (usar siempre 'qty')
+    // Actualizar STOCK (ATÓMICO en SQL) - usa siempre 'qty'
     // -----------------------------
     if (!Product) {
       console.warn('[sales/addsale] No hay modelo Product; saltando actualización de stock.');
@@ -311,25 +310,33 @@ router.post('/addsale', async (req, res) => {
         } else if (quantity <= 0) {
           console.warn(`[sales/addsale] Cantidad <= 0 para producto ${product_id}; no se descuenta stock.`);
         } else {
-          // Bloquear fila para evitar condiciones de carrera
-          const productRow = await Product.findOne({
-            where: { id: product_id },
+          // 1) Leer qty actual (solo para mostrar en email)
+          const beforeRow = await Product.findByPk(product_id, {
             attributes: ['id', 'product_name', STOCK_FIELD],
-            transaction: t,
-            lock: t.LOCK.UPDATE
+            transaction: t
           });
 
-          if (!productRow) {
+          if (!beforeRow) {
             console.warn(`[sales/addsale] Producto id=${product_id} no encontrado; no se actualiza stock.`);
           } else {
-            stockBefore = Number(productRow.get(STOCK_FIELD)) || 0;
-            stockAfter  = stockBefore - quantity;
-            if (stockAfter < 0) stockAfter = 0; // evita negativos
+            stockBefore = Number(beforeRow.get(STOCK_FIELD)) || 0;
 
-            await Product.update(
-              { [STOCK_FIELD]: stockAfter },
+            // 2) UPDATE atómico: qty = GREATEST(qty - :cantidad, 0)
+            const [affected] = await Product.update(
+              { [STOCK_FIELD]: sequelize.literal(`GREATEST(${STOCK_FIELD} - ${quantity}, 0)`) },
               { where: { id: product_id }, transaction: t }
             );
+
+            if (affected === 0) {
+              console.warn(`[sales/addsale] UPDATE no afectó filas para id=${product_id}.`);
+            }
+
+            // 3) Leer qty actualizado para el email
+            const afterRow = await Product.findByPk(product_id, {
+              attributes: ['id', 'product_name', STOCK_FIELD],
+              transaction: t
+            });
+            stockAfter = afterRow ? (Number(afterRow.get(STOCK_FIELD)) || 0) : null;
           }
         }
 
