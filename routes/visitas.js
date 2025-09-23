@@ -120,8 +120,8 @@ router.get('/capacitacion', async (_req, res) => {
 
     // Fallback sin modelo (ejemplos)
     const fallback = [
-      { id: 1, titulo: 'Cómo hacer un pedido', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', orden: 1, is_active: 1 },
-      { id: 2, titulo: 'Cómo cobrar una factura', url: 'https://youtu.be/9bZkp7q19f0', orden: 2, is_active: 1 },
+      { id: 1, titulo: 'Cómo hacer un pedido', url: 'https://youtu.be/O-rhnxV6qRc?si=DaUcwAFPCrZHTsvJ', orden: 1, is_active: 1 },
+      { id: 2, titulo: 'Cómo cobrar una factura', url: 'https://youtu.be/O-rhnxV6qRc?si=DaUcwAFPCrZHTsvJ', orden: 2, is_active: 1 },
     ];
     return res.json(fallback);
   } catch (e) {
