@@ -69,12 +69,9 @@ function safeDate(value, fallback = new Date()) {
   const d = value ? new Date(value) : fallback;
   return Number.isNaN(d.getTime()) ? fallback : d;
 }
-function detectStockField(Model) {
-  const attrs = Model?.rawAttributes || {};
-  // Damos prioridad a "qty", que es el que mostraste en tu modelo
-  const candidates = ['qty', 'stock', 'existencia', 'existencias', 'quantity', 'cantidad', 'in_stock', 'available', 'available_qty'];
-  return candidates.find(k => Object.prototype.hasOwnProperty.call(attrs, k));
-}
+
+// Usaremos SIEMPRE 'qty' (tu modelo lo define)
+const STOCK_FIELD = 'qty';
 
 // Umbral de alerta (stock bajo) — configurable por env; default 1000
 const LOW_STOCK_THRESHOLD = Number(process.env.LOW_STOCK_THRESHOLD || 1000);
@@ -164,7 +161,7 @@ router.get('/invoices/seller/:vendedorId', async (req, res) => {
 //   vendedor_id, payment_method ('cash'|'credit'),
 //   customer_id?, zona?,
 //   items|products|cartItems: [
-//     { product_id|id, product_name|name|title, quantity|qty|cantidad, price|unit_price|precio, subtotal? }
+//     { product_id|id|productId, product_name|name|title, quantity|qty|cantidad, price|unit_price|precio, subtotal? }
 //   ]
 // }
 // ─────────────────────────────────────────────────────────────────────────────
@@ -256,7 +253,7 @@ router.post('/addsale', async (req, res) => {
       };
 
       const rows = rawItems.map((it, idx) => {
-        const product_id   = it.product_id ?? it.id ?? null;
+        const product_id   = it.product_id ?? it.productId ?? it.id ?? null;
         const product_name = it.product_name ?? it.name ?? it.title ?? '';
         const quantity     = Number(it.quantity ?? it.qty ?? it.cantidad ?? 1);
         const unit_price   = Number(it.price ?? it.unit_price ?? it.precio ?? 0);
@@ -292,47 +289,61 @@ router.post('/addsale', async (req, res) => {
     }
 
     // -----------------------------
-    // Actualizar STOCK (si hay Product y campo de stock)
+    // Actualizar STOCK (usar siempre 'qty')
     // -----------------------------
-    let stockField = null;
-    if (Product) stockField = detectStockField(Product);
+    if (!Product) {
+      console.warn('[sales/addsale] No hay modelo Product; saltando actualización de stock.');
+    } else if (!Product.rawAttributes?.[STOCK_FIELD]) {
+      console.warn(`[sales/addsale] El modelo Product no tiene el campo '${STOCK_FIELD}'.`);
+    } else {
+      for (const it of rawItems) {
+        const product_id   = it.product_id ?? it.productId ?? it.id ?? null;
+        const product_name = it.product_name ?? it.name ?? it.title ?? `ID ${product_id}`;
+        const quantity     = Math.max(0, Number(it.quantity ?? it.qty ?? it.cantidad ?? 0) || 0);
+        const unit_price   = Number(it.price ?? it.unit_price ?? it.precio ?? 0);
+        const subtotal     = it.subtotal != null ? Number(it.subtotal) : Number((unit_price * quantity).toFixed(2));
 
-    for (const it of rawItems) {
-      const product_id   = it.product_id ?? it.id ?? null;
-      const product_name = it.product_name ?? it.name ?? it.title ?? `ID ${product_id}`;
-      const quantity     = Number(it.quantity ?? it.qty ?? it.cantidad ?? 1);
-      const unit_price   = Number(it.price ?? it.unit_price ?? it.precio ?? 0);
-      const subtotal     = it.subtotal != null ? Number(it.subtotal) : Number((unit_price * quantity).toFixed(2));
+        let stockBefore = null;
+        let stockAfter  = null;
 
-      let stockBefore = null;
-      let stockAfter  = null;
+        if (product_id == null) {
+          console.warn('[sales/addsale] Ítem sin product_id/id/productId; no se puede actualizar stock.', it);
+        } else if (quantity <= 0) {
+          console.warn(`[sales/addsale] Cantidad <= 0 para producto ${product_id}; no se descuenta stock.`);
+        } else {
+          // Bloquear fila para evitar condiciones de carrera
+          const productRow = await Product.findOne({
+            where: { id: product_id },
+            attributes: ['id', 'product_name', STOCK_FIELD],
+            transaction: t,
+            lock: t.LOCK.UPDATE
+          });
 
-      if (Product && product_id != null && stockField) {
-        // Bloquear fila para evitar condiciones de carrera
-        const productRow = await Product.findByPk(product_id, {
-          transaction: t,
-          lock: t.LOCK.UPDATE
-        });
+          if (!productRow) {
+            console.warn(`[sales/addsale] Producto id=${product_id} no encontrado; no se actualiza stock.`);
+          } else {
+            stockBefore = Number(productRow.get(STOCK_FIELD)) || 0;
+            stockAfter  = stockBefore - quantity;
+            if (stockAfter < 0) stockAfter = 0; // evita negativos
 
-        if (productRow && productRow[stockField] !== undefined) {
-          stockBefore = Number(productRow[stockField]) || 0;
-          stockAfter  = stockBefore - quantity;
-          if (stockAfter < 0) stockAfter = 0; // evita negativos
-
-          await productRow.update({ [stockField]: stockAfter }, { transaction: t });
+            await Product.update(
+              { [STOCK_FIELD]: stockAfter },
+              { where: { id: product_id }, transaction: t }
+            );
+          }
         }
-      }
 
-      itemsWithStock.push({
-        product_id,
-        product_name,
-        quantity,
-        unit_price,
-        subtotal,
-        stock_before: stockBefore,
-        stock_after: stockAfter,
-        low: (stockAfter != null) ? (stockAfter < LOW_STOCK_THRESHOLD) : false
-      });
+        itemsWithStock.push({
+          product_id,
+          product_name,
+          quantity,
+          unit_price,
+          subtotal,
+          stock_before: stockBefore,
+          stock_after: stockAfter,
+          low: (stockAfter != null) ? (stockAfter < LOW_STOCK_THRESHOLD) : false
+        });
+      }
     }
 
     // Confirmar la transacción
