@@ -360,7 +360,7 @@ router.post('/registrar-resultado', async (req, res) => {
 
     let visita = null;
 
-    if (v isita_id) {
+    if (visita_id) {
       visita = await VisitaProgramada.findByPk(visita_id);
       if (!visita) return res.status(404).json({ success: false, message: 'Visita no encontrada' });
     } else if (vendedor_id && customer_id) {
