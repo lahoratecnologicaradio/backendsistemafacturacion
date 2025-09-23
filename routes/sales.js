@@ -1,4 +1,4 @@
-// routes/invoices.js
+// routes/sales.js
 'use strict';
 
 const express = require('express');
@@ -12,26 +12,51 @@ const nodemailer = require('nodemailer');
 // MODELOS
 // ─────────────────────────────────────────────────────────────────────────────
 const Invoice = require('../models/Invoice'); // PK: invoice_number
-const Product  = (() => {
-  try { return require('../models/Product'); }
-  catch { console.warn('[invoices] Modelo Product no disponible; no se actualizará stock.'); return null; }
-})();
 
-let ProductSale = null; // detalle de productos vendidos
+let ProductSale = null;
 try {
-  ProductSale = require('../models/ProductSale');
+  ProductSale = require('../models/ProductSale');     // singular
 } catch (_e1) {
-  try { ProductSale = require('../models/ProductSales'); }
-  catch (_e2) { console.warn('[invoices] Modelo ProductSale/ProductSales no disponible. Se omitirá el detalle.'); }
+  try {
+    ProductSale = require('../models/ProductSales');  // plural
+  } catch (_e2) {
+    console.warn('[sales] Modelo ProductSale/ProductSales no disponible. Se omitirá el guardado de detalle.');
+    ProductSale = null;
+  }
 }
 
 let Payment = null;
-try { Payment = require('../models/Payment'); }
-catch { console.warn('[invoices] Modelo Payment no disponible (solo afecta /invoices/pay).'); }
+try {
+  Payment = require('../models/Payment');
+} catch {
+  console.warn('[sales] Modelo Payment no disponible (solo afecta /invoices/pay).');
+  Payment = null;
+}
 
 let Vendedor = null;
-try { Vendedor = require('../models/Vendedor'); }
-catch { console.warn('[invoices] Modelo Vendedor no disponible; el email usará solo vendedor_id.'); }
+try {
+  Vendedor = require('../models/Vendedor');
+} catch {
+  console.warn('[sales] Modelo Vendedor no disponible; el email usará solo vendedor_id.');
+  Vendedor = null;
+}
+
+// Product: declarar UNA SOLA VEZ con fallback
+let Product;
+try {
+  Product = require('../models/Product');
+} catch (e1) {
+  try {
+    Product = require('../models/Products');
+  } catch (e2) {
+    try {
+      Product = require('../models/Producto');
+    } catch (e3) {
+      Product = null;
+      console.warn('[sales] Modelo Product no disponible; no se actualizará stock.');
+    }
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -44,19 +69,25 @@ function safeDate(value, fallback = new Date()) {
   const d = value ? new Date(value) : fallback;
   return Number.isNaN(d.getTime()) ? fallback : d;
 }
+function detectStockField(Model) {
+  const attrs = Model?.rawAttributes || {};
+  // Damos prioridad a "qty", que es el que mostraste en tu modelo
+  const candidates = ['qty', 'stock', 'existencia', 'existencias', 'quantity', 'cantidad', 'in_stock', 'available', 'available_qty'];
+  return candidates.find(k => Object.prototype.hasOwnProperty.call(attrs, k));
+}
 
-// Umbral de alerta de bajo stock (default 1000)
+// Umbral de alerta (stock bajo) — configurable por env; default 1000
 const LOW_STOCK_THRESHOLD = Number(process.env.LOW_STOCK_THRESHOLD || 1000);
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Email / SMTP (usar variables de entorno)
+// Email / SMTP (usar variables de entorno) — configuración robusta TLS
 // ─────────────────────────────────────────────────────────────────────────────
 const mailFrom = process.env.MAIL_FROM || process.env.SMTP_USER || 'ventas@example.com';
 const mailTo   = process.env.SALES_TO || process.env.MAIL_TO || 'ventas@example.com';
 
-const SMTP_HOST   = process.env.SMTP_HOST || 'smtp.gmail.com';
-const SMTP_PORT   = Number(process.env.SMTP_PORT || 587);
-const SMTP_SECURE = SMTP_PORT === 465; // 465 = TLS directo, 587 = STARTTLS
+const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com';
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_SECURE = SMTP_PORT === 465; // 465 => TLS directo; 587 => STARTTLS
 
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
@@ -65,10 +96,10 @@ const transporter = nodemailer.createTransport({
   auth: (process.env.SMTP_USER && process.env.SMTP_PASS)
     ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
     : undefined,
-  requireTLS: !SMTP_SECURE,         // fuerza STARTTLS en 587
+  requireTLS: !SMTP_SECURE,
   tls: {
     minVersion: 'TLSv1.2',
-    servername: SMTP_HOST,          // SNI correcto
+    servername: SMTP_HOST,
   },
 });
 
@@ -126,16 +157,12 @@ router.get('/invoices/seller/:vendedorId', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CREAR FACTURA + REBAJAR STOCK + EMAIL DETALLADO
-//  - payment_method ('cash' | 'credit')
-//  - paid_at: contado => fecha; crédito => null
-//  - guarda detalle si existe ProductSale
-//  - rebaja stock de Product.qty por cada item
-//  - manda correo con productos y stock antes/después (alerta si < threshold)
-// Body esperado (flexible en items):
+// CREAR FACTURA + Actualizar stock + Email de venta
+// Body:
 // {
 //   invoice_number, date_time, customer_name, total, cash, change,
-//   vendedor_id, payment_method, customer_id?, zona?,
+//   vendedor_id, payment_method ('cash'|'credit'),
+//   customer_id?, zona?,
 //   items|products|cartItems: [
 //     { product_id|id, product_name|name|title, quantity|qty|cantidad, price|unit_price|precio, subtotal? }
 //   ]
@@ -171,14 +198,15 @@ router.post('/addsale', async (req, res) => {
       return res.status(400).json({ error: 'Faltan campos requeridos' });
     }
 
-    const method   = String(payment_method || 'cash').toLowerCase();
-    const dt       = safeDate(date_time);
+    const method = String(payment_method || 'cash').toLowerCase();
+    const dt = safeDate(date_time);
     const absTotal = absNum(total);
 
-    // contado => pagado completo; crédito => 0
+    // Si es contado, se paga completo en el acto
     const paidAmount = method === 'cash' ? absTotal : 0;
     const paidAt     = method === 'cash' ? dt : null;
 
+    // Si la tabla tiene 'balance', lo calculamos para crédito
     const updatesIfHave = {};
     if (Invoice.rawAttributes?.balance) {
       updatesIfHave.balance = method === 'credit' ? Math.max(absTotal - paidAmount, 0) : 0;
@@ -190,18 +218,20 @@ router.post('/addsale', async (req, res) => {
       date_time: dt,
       customer_id: customer_id ?? null,
       customer_name,
-      total,                    // puede venir negativo para crédito; se respeta
+      total,                    // puede venir negativo para crédito; mantenemos lo que manda el POS
       cash,
       change,
       vendedor_id: vendedor_id ?? null,
-      payment_method: method,
-      paid_amount: paidAmount,
-      paid_at: paidAt,
-      zona: zona ?? null,
+      payment_method: method,   // guardamos el método
+      paid_amount: paidAmount,  // contado=total, crédito=0
+      paid_at: paidAt,          // fecha del pago (solo contado)
+      zona: zona ?? null,       // si existe la columna, Sequelize lo ignorará si no existe
       ...updatesIfHave
     }, { transaction: t });
 
-    // Normalizar items
+    // -----------------------------
+    // Detalle de productos vendidos
+    // -----------------------------
     const rawItems = Array.isArray(req.body.items)
       ? req.body.items
       : Array.isArray(req.body.products)
@@ -210,9 +240,10 @@ router.post('/addsale', async (req, res) => {
           ? req.body.cartItems
           : [];
 
+    // Para el email (incluyendo stock antes/después)
     const itemsWithStock = [];
 
-    // Guardar detalle si existe tabla ProductSale
+    // Guardar detalle (si el modelo existe)
     if (ProductSale && rawItems.length > 0) {
       const fkInvoiceId =
         ProductSale.rawAttributes?.invoice_number ? 'invoice_number'
@@ -260,7 +291,12 @@ router.post('/addsale', async (req, res) => {
       }
     }
 
-    // Rebajar STOCK (Product.qty) por cada ítem
+    // -----------------------------
+    // Actualizar STOCK (si hay Product y campo de stock)
+    // -----------------------------
+    let stockField = null;
+    if (Product) stockField = detectStockField(Product);
+
     for (const it of rawItems) {
       const product_id   = it.product_id ?? it.id ?? null;
       const product_name = it.product_name ?? it.name ?? it.title ?? `ID ${product_id}`;
@@ -271,19 +307,19 @@ router.post('/addsale', async (req, res) => {
       let stockBefore = null;
       let stockAfter  = null;
 
-      if (Product && product_id != null) {
-        // Lock de fila para evitar carreras
+      if (Product && product_id != null && stockField) {
+        // Bloquear fila para evitar condiciones de carrera
         const productRow = await Product.findByPk(product_id, {
           transaction: t,
           lock: t.LOCK.UPDATE
         });
 
-        if (productRow && typeof productRow.qty !== 'undefined') {
-          stockBefore = Number(productRow.qty) || 0;
+        if (productRow && productRow[stockField] !== undefined) {
+          stockBefore = Number(productRow[stockField]) || 0;
           stockAfter  = stockBefore - quantity;
           if (stockAfter < 0) stockAfter = 0; // evita negativos
 
-          await productRow.update({ qty: stockAfter }, { transaction: t });
+          await productRow.update({ [stockField]: stockAfter }, { transaction: t });
         }
       }
 
@@ -299,10 +335,10 @@ router.post('/addsale', async (req, res) => {
       });
     }
 
-    // Confirmar transacción
+    // Confirmar la transacción
     await t.commit();
 
-    // ── Email (después del commit; si falla, NO afecta la venta) ────────────
+    // ── Email (después del commit; si falla, no afecta la venta) ────────────
     (async () => {
       try {
         let vendedorNombre = vendedor_id ? `ID ${vendedor_id}` : 'Sin vendedor';
@@ -317,6 +353,7 @@ router.post('/addsale', async (req, res) => {
 
         if (!transporter) return;
 
+        // Etiquetas para HTML y para el asunto
         const tipo       = method === 'credit' ? 'CRÉDITO' : 'CONTADO';
         const tipoAsunto = method === 'credit' ? 'crédito' : 'contado';
         const fechaVenta = dt.toLocaleString('es-DO');
@@ -331,11 +368,11 @@ router.post('/addsale', async (req, res) => {
         const montoAsunto = formatoRD.format(absTotal);
         const asunto = `El vendedor ${vendedorNombre} ha realizado una venta ${tipoAsunto} al cliente ${customer_name} por un monto de ${montoAsunto}`;
 
-        // Tabla de productos + alertas
+        // Tabla de productos para el correo
         const rowsHtml = (itemsWithStock || []).map(it => {
-          const warn   = it.low ? 'background:#ffebee;' : '';
-          const price  = formatoRD.format(Number(it.unit_price || 0));
-          const sub    = formatoRD.format(Number(it.subtotal || 0));
+          const warn = it.low ? 'background:#ffebee;' : '';
+          const price = formatoRD.format(Number(it.unit_price || 0));
+          const sub   = formatoRD.format(Number(it.subtotal || 0));
           const before = (it.stock_before == null) ? '—' : it.stock_before.toLocaleString('es-DO');
           const after  = (it.stock_after  == null) ? '—' : it.stock_after.toLocaleString('es-DO');
 
@@ -403,7 +440,7 @@ router.post('/addsale', async (req, res) => {
           html
         });
       } catch (e) {
-        console.warn('[addsale] No se pudo enviar correo:', e?.message);
+        console.warn('[sales/addsale] No se pudo enviar correo:', e?.message);
       }
     })();
 
@@ -433,8 +470,9 @@ router.get('/getsale/:invoice_number', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ACTUALIZAR POR invoice_number
-// ─────────────────────────────────────────────────────────────────────────────
+/** ACTUALIZAR POR invoice_number
+ *  - si envías payment_method/paid_amount/paid_at también se actualizan
+ */
 router.put('/updatesale/:invoice_number', async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -509,7 +547,7 @@ router.delete('/deletesale/:invoice_number', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-— REGISTRAR PAGO (ABONO) A CRÉDITO
+// REGISTRAR PAGO (ABONO) A CRÉDITO
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/invoices/pay/:invoice_number', async (req, res) => {
   const t = await sequelize.transaction();
@@ -568,7 +606,7 @@ router.post('/invoices/pay/:invoice_number', async (req, res) => {
         await Payment.create(payload, { transaction: t });
       }
     } catch (e) {
-      console.warn('[invoices/pay] No se pudo registrar Payment:', e?.message);
+      console.warn('[sales/invoices/pay] No se pudo registrar Payment:', e?.message);
     }
 
     const newPaid = alreadyPaid + amt;
@@ -578,7 +616,7 @@ router.post('/invoices/pay/:invoice_number', async (req, res) => {
     if (Invoice.rawAttributes?.balance) updates.balance = newBalance;
     if (newBalance === 0) {
       updates.paid_at = payAt;
-      if (method === 'credit') updates.total = absTotal; // poner en positivo para UI consistente
+      if (method === 'credit') updates.total = absTotal; // poner en positivo (consistencia UI)
     }
 
     await invoice.update(updates, { transaction: t });
