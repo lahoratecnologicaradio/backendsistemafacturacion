@@ -8,33 +8,30 @@ const { sequelize } = require('../db');
 const { QueryTypes } = require('sequelize');
 const nodemailer = require('nodemailer');
 
+// ─────────────────────────────────────────────────────────────────────────────
 // MODELOS
+// ─────────────────────────────────────────────────────────────────────────────
 const Invoice = require('../models/Invoice'); // PK: invoice_number
+const Product  = (() => {
+  try { return require('../models/Product'); }
+  catch { console.warn('[invoices] Modelo Product no disponible; no se actualizará stock.'); return null; }
+})();
 
-let ProductSale = null; // tabla de detalle de productos vendidos
+let ProductSale = null; // detalle de productos vendidos
 try {
-  ProductSale = require('../models/ProductSale');     // singular
+  ProductSale = require('../models/ProductSale');
 } catch (_e1) {
-  try {
-    ProductSale = require('../models/ProductSales');  // plural
-  } catch (_e2) {
-    console.warn('[invoices] Modelo ProductSale/ProductSales no disponible. Se omitirá el guardado de detalle.');
-  }
+  try { ProductSale = require('../models/ProductSales'); }
+  catch (_e2) { console.warn('[invoices] Modelo ProductSale/ProductSales no disponible. Se omitirá el detalle.'); }
 }
 
 let Payment = null;
-try {
-  Payment = require('../models/Payment');
-} catch {
-  console.warn('[invoices] Modelo Payment no disponible (solo afecta /invoices/pay).');
-}
+try { Payment = require('../models/Payment'); }
+catch { console.warn('[invoices] Modelo Payment no disponible (solo afecta /invoices/pay).'); }
 
 let Vendedor = null;
-try {
-  Vendedor = require('../models/Vendedor');
-} catch {
-  console.warn('[invoices] Modelo Vendedor no disponible; el email usará solo vendedor_id.');
-}
+try { Vendedor = require('../models/Vendedor'); }
+catch { console.warn('[invoices] Modelo Vendedor no disponible; el email usará solo vendedor_id.'); }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -48,16 +45,18 @@ function safeDate(value, fallback = new Date()) {
   return Number.isNaN(d.getTime()) ? fallback : d;
 }
 
+// Umbral de alerta de bajo stock (default 1000)
+const LOW_STOCK_THRESHOLD = Number(process.env.LOW_STOCK_THRESHOLD || 1000);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Email / SMTP (usar variables de entorno)
 // ─────────────────────────────────────────────────────────────────────────────
 const mailFrom = process.env.MAIL_FROM || process.env.SMTP_USER || 'ventas@example.com';
 const mailTo   = process.env.SALES_TO || process.env.MAIL_TO || 'ventas@example.com';
 
-// Derivar secure del puerto para evitar “wrong version number”
-const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com';
-const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
-const SMTP_SECURE = SMTP_PORT === 465; // 465 => TLS directo, 587 => STARTTLS
+const SMTP_HOST   = process.env.SMTP_HOST || 'smtp.gmail.com';
+const SMTP_PORT   = Number(process.env.SMTP_PORT || 587);
+const SMTP_SECURE = SMTP_PORT === 465; // 465 = TLS directo, 587 = STARTTLS
 
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
@@ -66,10 +65,10 @@ const transporter = nodemailer.createTransport({
   auth: (process.env.SMTP_USER && process.env.SMTP_PASS)
     ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
     : undefined,
-  requireTLS: !SMTP_SECURE,           // Forzar STARTTLS cuando es 587
+  requireTLS: !SMTP_SECURE,         // fuerza STARTTLS en 587
   tls: {
     minVersion: 'TLSv1.2',
-    servername: SMTP_HOST,            // SNI correcto
+    servername: SMTP_HOST,          // SNI correcto
   },
 });
 
@@ -127,53 +126,20 @@ router.get('/invoices/seller/:vendedorId', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CREAR FACTURA
-//  - Guarda payment_method ('cash' | 'credit')
-//  - Guarda paid_at (si es contado se marca fecha de pago, si es crédito queda null)
-//  - Guarda detalle en ProductSales (si el modelo existe)
-//  - Envía correo con: vendedor, monto, tipo, cliente, fecha, zona
+// CREAR FACTURA + REBAJAR STOCK + EMAIL DETALLADO
+//  - payment_method ('cash' | 'credit')
+//  - paid_at: contado => fecha; crédito => null
+//  - guarda detalle si existe ProductSale
+//  - rebaja stock de Product.qty por cada item
+//  - manda correo con productos y stock antes/después (alerta si < threshold)
 // Body esperado (flexible en items):
 // {
 //   invoice_number, date_time, customer_name, total, cash, change,
 //   vendedor_id, payment_method, customer_id?, zona?,
-//   items|products|cartItems: [ { product_id|id, product_name|name|title, quantity|qty|cantidad, price|unit_price|precio, subtotal? } ]
+//   items|products|cartItems: [
+//     { product_id|id, product_name|name|title, quantity|qty|cantidad, price|unit_price|precio, subtotal? }
+//   ]
 // }
-// ─────────────────────────────────────────────────────────────────────────────
-// --- arriba en el archivo (una sola vez) ---
-let Product = null;
-try { Product = require('../models/Product'); }
-catch (_) { try { Product = require('../models/Products'); }
-catch (_2) { try { Product = require('../models/Producto'); } catch (_3) {} } }
-
-// Campo de stock: lo detectamos dinámicamente
-function detectStockField(Model) {
-  const attrs = Model?.rawAttributes || {};
-  const candidates = [
-    'stock', 'existencia', 'existencias', 'quantity', 'qty', 'cantidad',
-    'in_stock', 'available', 'available_qty'
-  ];
-  return candidates.find(k => attrs[k]);
-}
-
-// Umbral de alerta (configurable por env; default 1000)
-const LOW_STOCK_THRESHOLD = Number(process.env.LOW_STOCK_THRESHOLD || 1000);
-
-// -------------------------------------------------------------
-//  Crear venta + actualizar stock + email con productos/stock
-// -------------------------------------------------------------
-r// IMPORTA EL MODELO PRODUCT ARRIBA DEL ARCHIVO (si aún no lo hiciste)
-let Product = null;
-try {
-  Product = require('../models/Product'); // ajusta la ruta si fuese distinto
-} catch (_) {
-  console.warn('[addsale] Modelo Product no disponible; no se actualizará stock.');
-}
-
-// UMBRAL DE STOCK BAJO (puedes ajustarlo por variable de entorno)
-const LOW_STOCK_THRESHOLD = Number(process.env.LOW_STOCK_THRESHOLD || 1000);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// CREAR FACTURA (con descuento de stock y correo con detalle)
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/addsale', async (req, res) => {
   const t = await sequelize.transaction();
@@ -209,23 +175,22 @@ router.post('/addsale', async (req, res) => {
     const dt       = safeDate(date_time);
     const absTotal = absNum(total);
 
-    // Si es contado → pagado completo en el acto
+    // contado => pagado completo; crédito => 0
     const paidAmount = method === 'cash' ? absTotal : 0;
     const paidAt     = method === 'cash' ? dt : null;
 
-    // Si la tabla tiene 'balance', lo calculamos para crédito
     const updatesIfHave = {};
     if (Invoice.rawAttributes?.balance) {
       updatesIfHave.balance = method === 'credit' ? Math.max(absTotal - paidAmount, 0) : 0;
     }
 
-    // 1) Crear la factura
+    // Crear la factura
     const invoice = await Invoice.create({
       invoice_number,
       date_time: dt,
       customer_id: customer_id ?? null,
       customer_name,
-      total,                    // mantenemos lo que manda el POS (puede venir negativo para crédito)
+      total,                    // puede venir negativo para crédito; se respeta
       cash,
       change,
       vendedor_id: vendedor_id ?? null,
@@ -236,7 +201,7 @@ router.post('/addsale', async (req, res) => {
       ...updatesIfHave
     }, { transaction: t });
 
-    // 2) Normalizar items del body (items | products | cartItems)
+    // Normalizar items
     const rawItems = Array.isArray(req.body.items)
       ? req.body.items
       : Array.isArray(req.body.products)
@@ -245,68 +210,10 @@ router.post('/addsale', async (req, res) => {
           ? req.body.cartItems
           : [];
 
-    // Colección para el email
     const itemsWithStock = [];
 
-    // 3) Descontar stock SIEMPRE (aunque no exista ProductSale)
-    for (let idx = 0; idx < rawItems.length; idx++) {
-      const it = rawItems[idx];
-
-      const product_id   = it.product_id ?? it.id ?? null;
-      const product_name = it.product_name ?? it.name ?? it.title ?? (product_id ? `ID ${product_id}` : 'Producto');
-      const quantity     = Number(it.quantity ?? it.qty ?? it.cantidad ?? 1);
-      const unit_price   = Number(it.price ?? it.unit_price ?? it.precio ?? 0);
-      const subtotal     = it.subtotal != null ? Number(it.subtotal) : Number((unit_price * quantity).toFixed(2));
-
-      let stockBefore = null;
-      let stockAfter  = null;
-      let unitOfMeasure = it.unit_of_measure || null;
-
-      if (Product && product_id != null) {
-        // Lock para evitar condiciones de carrera
-        const productRow = await Product.findOne({
-          where: { id: product_id },
-          transaction: t,
-          lock: t.LOCK.UPDATE
-        });
-
-        if (productRow) {
-          if (!Object.prototype.hasOwnProperty.call(Product.rawAttributes, 'qty')) {
-            console.warn('[addsale] El modelo Product no tiene el campo "qty". No se puede actualizar stock.');
-          } else {
-            stockBefore = Number(productRow.qty) || 0;
-            stockAfter  = stockBefore - quantity;
-            if (stockAfter < 0) stockAfter = 0; // evitar negativos
-
-            await productRow.update({ qty: stockAfter }, { transaction: t });
-
-            // si no vino la unidad en el item, úsala del producto
-            unitOfMeasure = unitOfMeasure || productRow.unit_of_measure || null;
-          }
-        } else {
-          console.warn(`[addsale] Producto ${product_id} no encontrado; no se actualiza stock.`);
-        }
-      } else {
-        console.warn('[addsale] Product model no disponible o product_id nulo; no se actualiza stock.');
-      }
-
-      itemsWithStock.push({
-        line_number: (idx + 1),
-        product_id,
-        product_name,
-        quantity,
-        unit_price,
-        subtotal,
-        unit_of_measure: unitOfMeasure,
-        stock_before: stockBefore,
-        stock_after: stockAfter,
-        low: (stockAfter != null) ? (stockAfter < LOW_STOCK_THRESHOLD) : false
-      });
-    }
-
-    // 4) Guardar detalle de productos (si hay modelo ProductSale)
+    // Guardar detalle si existe tabla ProductSale
     if (ProductSale && rawItems.length > 0) {
-      // Detectar FK que espera el modelo
       const fkInvoiceId =
         ProductSale.rawAttributes?.invoice_number ? 'invoice_number'
         : ProductSale.rawAttributes?.invoice_id ? 'invoice_id'
@@ -317,28 +224,34 @@ router.post('/addsale', async (req, res) => {
         ...(ProductSale.rawAttributes?.customer_id ? { customer_id: customer_id ?? null } : {})
       };
 
-      const rows = itemsWithStock.map((it) => {
+      const rows = rawItems.map((it, idx) => {
+        const product_id   = it.product_id ?? it.id ?? null;
+        const product_name = it.product_name ?? it.name ?? it.title ?? '';
+        const quantity     = Number(it.quantity ?? it.qty ?? it.cantidad ?? 1);
+        const unit_price   = Number(it.price ?? it.unit_price ?? it.precio ?? 0);
+        const subtotal     = it.subtotal != null ? Number(it.subtotal) : Number((unit_price * quantity).toFixed(2));
+
         const base = {
-          product_id: it.product_id ?? null,
-          product_name: it.product_name ?? '',
-          quantity: it.quantity,
-          unit_price: it.unit_price,
-          subtotal: it.subtotal,
-          line_number: it.line_number,
+          product_id,
+          product_name,
+          quantity,
+          unit_price,
+          subtotal,
+          line_number: (idx + 1),
           ...commonCols
         };
+
         if (fkInvoiceId === 'invoice_number') base.invoice_number = invoice_number;
-        else if (fkInvoiceId === 'invoice_id') base.invoice_id = invoice_number; // ajusta si tu FK apunta al ID interno
+        else if (fkInvoiceId === 'invoice_id') base.invoice_id = invoice_number;
+
         return base;
       });
 
-      // Filtra columnas inexistentes para no romper con modelos minimalistas
+      // Filtrar columnas inexistentes
       const allowed = Object.keys(ProductSale.rawAttributes);
       const sanitizedRows = rows.map(r => {
         const out = {};
-        for (const k of Object.keys(r)) {
-          if (allowed.includes(k)) out[k] = r[k];
-        }
+        for (const k of Object.keys(r)) if (allowed.includes(k)) out[k] = r[k];
         return out;
       });
 
@@ -347,10 +260,49 @@ router.post('/addsale', async (req, res) => {
       }
     }
 
-    // 5) Commit final
+    // Rebajar STOCK (Product.qty) por cada ítem
+    for (const it of rawItems) {
+      const product_id   = it.product_id ?? it.id ?? null;
+      const product_name = it.product_name ?? it.name ?? it.title ?? `ID ${product_id}`;
+      const quantity     = Number(it.quantity ?? it.qty ?? it.cantidad ?? 1);
+      const unit_price   = Number(it.price ?? it.unit_price ?? it.precio ?? 0);
+      const subtotal     = it.subtotal != null ? Number(it.subtotal) : Number((unit_price * quantity).toFixed(2));
+
+      let stockBefore = null;
+      let stockAfter  = null;
+
+      if (Product && product_id != null) {
+        // Lock de fila para evitar carreras
+        const productRow = await Product.findByPk(product_id, {
+          transaction: t,
+          lock: t.LOCK.UPDATE
+        });
+
+        if (productRow && typeof productRow.qty !== 'undefined') {
+          stockBefore = Number(productRow.qty) || 0;
+          stockAfter  = stockBefore - quantity;
+          if (stockAfter < 0) stockAfter = 0; // evita negativos
+
+          await productRow.update({ qty: stockAfter }, { transaction: t });
+        }
+      }
+
+      itemsWithStock.push({
+        product_id,
+        product_name,
+        quantity,
+        unit_price,
+        subtotal,
+        stock_before: stockBefore,
+        stock_after: stockAfter,
+        low: (stockAfter != null) ? (stockAfter < LOW_STOCK_THRESHOLD) : false
+      });
+    }
+
+    // Confirmar transacción
     await t.commit();
 
-    // 6) Envío de correo (fuera de la transacción; si falla no rompe la venta)
+    // ── Email (después del commit; si falla, NO afecta la venta) ────────────
     (async () => {
       try {
         let vendedorNombre = vendedor_id ? `ID ${vendedor_id}` : 'Sin vendedor';
@@ -365,79 +317,89 @@ router.post('/addsale', async (req, res) => {
 
         if (!transporter) return;
 
-        // Etiquetas para HTML y para el asunto
-        const tipo       = method === 'credit' ? 'CRÉDITO' : 'CONTADO';   // cuerpo (mayúsculas)
-        const tipoAsunto = method === 'credit' ? 'crédito' : 'contado';   // asunto (minúsculas)
-
+        const tipo       = method === 'credit' ? 'CRÉDITO' : 'CONTADO';
+        const tipoAsunto = method === 'credit' ? 'crédito' : 'contado';
         const fechaVenta = dt.toLocaleString('es-DO');
-        const montoAsunto = new Intl.NumberFormat('es-DO', {
-          style: 'currency', currency: 'DOP', minimumFractionDigits: 2, maximumFractionDigits: 2,
-        }).format(absTotal);
 
-        // Asunto solicitado
-        const subject = `El vendedor ${vendedorNombre} ha realizado una venta ${tipoAsunto} al cliente ${customer_name} por un monto de ${montoAsunto}`;
+        const formatoRD = new Intl.NumberFormat('es-DO', {
+          style: 'currency',
+          currency: 'DOP',
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        });
 
-        // Tabla HTML de productos con stock antes/después y alerta si < LOW_STOCK_THRESHOLD
-        const itemsRows = itemsWithStock.map(it => {
-          const alerta = it.low
-            ? `<div style="color:#b71c1c;font-weight:700;">ALERTA: stock bajo (${it.stock_after ?? '—'} &lt; ${LOW_STOCK_THRESHOLD})</div>`
-            : '';
+        const montoAsunto = formatoRD.format(absTotal);
+        const asunto = `El vendedor ${vendedorNombre} ha realizado una venta ${tipoAsunto} al cliente ${customer_name} por un monto de ${montoAsunto}`;
+
+        // Tabla de productos + alertas
+        const rowsHtml = (itemsWithStock || []).map(it => {
+          const warn   = it.low ? 'background:#ffebee;' : '';
+          const price  = formatoRD.format(Number(it.unit_price || 0));
+          const sub    = formatoRD.format(Number(it.subtotal || 0));
+          const before = (it.stock_before == null) ? '—' : it.stock_before.toLocaleString('es-DO');
+          const after  = (it.stock_after  == null) ? '—' : it.stock_after.toLocaleString('es-DO');
+
           return `
-            <tr>
-              <td>${it.line_number}</td>
+            <tr style="${warn}">
               <td>${it.product_name}</td>
-              <td style="text-align:center;">${it.quantity} ${it.unit_of_measure ? it.unit_of_measure : ''}</td>
-              <td style="text-align:right;">RD$ ${(Number(it.unit_price)||0).toFixed(2)}</td>
-              <td style="text-align:right;">RD$ ${(Number(it.subtotal)||0).toFixed(2)}</td>
-              <td style="text-align:center;">${it.stock_before ?? '—'}</td>
-              <td style="text-align:center;">${it.stock_after  ?? '—'}</td>
-              <td>${alerta}</td>
+              <td style="text-align:right;">${Number(it.quantity || 0).toLocaleString('es-DO')}</td>
+              <td style="text-align:right;">${price}</td>
+              <td style="text-align:right;">${sub}</td>
+              <td style="text-align:right;">${before}</td>
+              <td style="text-align:right;"><b>${after}</b></td>
             </tr>
           `;
         }).join('');
 
+        const lowAlerts = (itemsWithStock || [])
+          .filter(it => it.low)
+          .map(it => `<li><span style="color:#b71c1c;font-weight:700;">ALERTA:</span> El producto <b>${it.product_name}</b> está <span style="color:#b71c1c;">próximo a vencerse</span> (stock ${it.stock_after})</li>`)
+          .join('');
+
+        const htmlProductos = `
+          <h4 style="margin:16px 0 8px;">Detalle de productos</h4>
+          <table cellpadding="6" cellspacing="0" style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead>
+              <tr style="background:#f5f5f5;">
+                <th style="text-align:left;">Producto</th>
+                <th style="text-align:right;">Cant.</th>
+                <th style="text-align:right;">Precio</th>
+                <th style="text-align:right;">Subtotal</th>
+                <th style="text-align:right;">Stock antes</th>
+                <th style="text-align:right;">Stock después</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsHtml || `<tr><td colspan="6" style="text-align:center;color:#777;">(Sin detalle)</td></tr>`}
+            </tbody>
+          </table>
+          ${lowAlerts ? `
+            <div style="margin-top:10px;">
+              <ul style="margin:8px 0 0 18px; padding:0;">${lowAlerts}</ul>
+            </div>
+          ` : ''}
+        `;
+
         const html = `
           <div style="font-family:Arial,Helvetica,sans-serif; color:#222;">
-            <h3>Nueva venta registrada</h3>
-            <ul>
+            <h3 style="margin:0 0 6px;">Nueva venta registrada</h3>
+            <ul style="margin:0 0 12px 18px; padding:0; line-height:1.4;">
               <li><b>Factura:</b> ${invoice_number}</li>
               <li><b>Fecha:</b> ${fechaVenta}</li>
               <li><b>Cliente:</b> ${customer_name}</li>
-              <li><b>Monto:</b> RD$ ${absTotal.toFixed(2)}</li>
+              <li><b>Monto:</b> ${montoAsunto}</li>
               <li><b>Método:</b> ${tipo}</li>
               <li><b>Vendedor:</b> ${vendedorNombre}</li>
               <li><b>Zona:</b> ${vendedorZona ?? '—'}</li>
             </ul>
-
-            <h4 style="margin-top:18px;">Detalle de productos</h4>
-            <table border="0" cellpadding="6" cellspacing="0" style="border-collapse:collapse; width:100%; font-size:13px;">
-              <thead>
-                <tr style="background:#f5f5f5;">
-                  <th>#</th>
-                  <th>Producto</th>
-                  <th>Cantidad</th>
-                  <th style="text-align:right;">Precio</th>
-                  <th style="text-align:right;">Subtotal</th>
-                  <th>Stock antes</th>
-                  <th>Stock después</th>
-                  <th>Alertas</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${itemsRows || '<tr><td colspan="8" style="text-align:center;color:#888;">(sin items)</td></tr>'}
-              </tbody>
-            </table>
-
-            <p style="font-size:12px;color:#666;margin-top:10px;">
-              Umbral de alerta de stock: ${LOW_STOCK_THRESHOLD}.
-            </p>
+            ${htmlProductos}
           </div>
         `;
 
         await transporter.sendMail({
           from: mailFrom,
           to: mailTo,
-          subject,
+          subject: asunto,
           html
         });
       } catch (e) {
@@ -456,8 +418,6 @@ router.post('/addsale', async (req, res) => {
   }
 });
 
-
-
 // ─────────────────────────────────────────────────────────────────────────────
 // OBTENER POR invoice_number
 // ─────────────────────────────────────────────────────────────────────────────
@@ -474,7 +434,6 @@ router.get('/getsale/:invoice_number', async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ACTUALIZAR POR invoice_number
-//  - si envías payment_method/paid_amount/paid_at también se actualizan
 // ─────────────────────────────────────────────────────────────────────────────
 router.put('/updatesale/:invoice_number', async (req, res) => {
   const t = await sequelize.transaction();
@@ -511,7 +470,6 @@ router.put('/updatesale/:invoice_number', async (req, res) => {
 
     if (paid_at !== undefined) updates.paid_at = paid_at ? safeDate(paid_at) : null;
 
-    // balance si existe
     if (Invoice.rawAttributes?.balance) {
       const method = String(updates.payment_method || '').toLowerCase();
       const absTotal = absNum(updates.total);
@@ -551,7 +509,7 @@ router.delete('/deletesale/:invoice_number', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// REGISTRAR PAGO (ABONO) A CRÉDITO
+— REGISTRAR PAGO (ABONO) A CRÉDITO
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/invoices/pay/:invoice_number', async (req, res) => {
   const t = await sequelize.transaction();
@@ -620,7 +578,7 @@ router.post('/invoices/pay/:invoice_number', async (req, res) => {
     if (Invoice.rawAttributes?.balance) updates.balance = newBalance;
     if (newBalance === 0) {
       updates.paid_at = payAt;
-      if (method === 'credit') updates.total = absTotal; // poner en positivo (consistencia UI)
+      if (method === 'credit') updates.total = absTotal; // poner en positivo para UI consistente
     }
 
     await invoice.update(updates, { transaction: t });
