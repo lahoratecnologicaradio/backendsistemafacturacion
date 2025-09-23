@@ -5,14 +5,14 @@ const express = require('express');
 const router = express.Router();
 const { validationResult } = require('express-validator');
 const { sequelize } = require('../db');
-const { QueryTypes, literal } = require('sequelize');
+const { QueryTypes } = require('sequelize');
 const nodemailer = require('nodemailer');
 
 // MODELOS
 const Invoice = require('../models/Invoice'); // PK: invoice_number
+
 let ProductSale = null; // tabla de detalle de productos vendidos
 try {
-  // Usa el que tengas disponible
   ProductSale = require('../models/ProductSale');     // singular
 } catch (_e1) {
   try {
@@ -39,12 +39,6 @@ try {
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
-function ymdLocal(d = new Date()) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
 function absNum(n) {
   const v = Number(n) || 0;
   return Math.abs(v);
@@ -54,17 +48,29 @@ function safeDate(value, fallback = new Date()) {
   return Number.isNaN(d.getTime()) ? fallback : d;
 }
 
-// Config de correo (usar variables de entorno)
-const mailFrom = process.env.MAIL_FROM || process.env.SMTP_USER || 'no-reply@example.com';
+// ─────────────────────────────────────────────────────────────────────────────
+// Email / SMTP (usar variables de entorno)
+// ─────────────────────────────────────────────────────────────────────────────
+const mailFrom = process.env.MAIL_FROM || process.env.SMTP_USER || 'ventas@example.com';
 const mailTo   = process.env.SALES_TO || process.env.MAIL_TO || 'ventas@example.com';
+
+// Derivar secure del puerto para evitar “wrong version number”
+const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com';
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_SECURE = SMTP_PORT === 465; // 465 => TLS directo, 587 => STARTTLS
+
 const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || 'smtp.gmail.com',
-  port: Number(process.env.SMTP_PORT || 587),
-  secure: String(process.env.SMTP_SECURE || 'false') === 'true',
-  auth: (process.env.SMTP_USER && process.env.SMTP_PASS) ? {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS
-  } : undefined,
+  host: SMTP_HOST,
+  port: SMTP_PORT,
+  secure: SMTP_SECURE,
+  auth: (process.env.SMTP_USER && process.env.SMTP_PASS)
+    ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+    : undefined,
+  requireTLS: !SMTP_SECURE,           // Forzar STARTTLS cuando es 587
+  tls: {
+    minVersion: 'TLSv1.2',
+    servername: SMTP_HOST,            // SNI correcto
+  },
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -73,7 +79,7 @@ const transporter = nodemailer.createTransport({
 router.get('/fetchallsales', async (_req, res) => {
   try {
     await sequelize.authenticate();
-    const invoices = await Invoice.findAll({ order: [['date_time', ' DESC']] });
+    const invoices = await Invoice.findAll({ order: [['date_time', 'DESC']] });
     res.json(invoices);
   } catch (error) {
     console.error('❌ fetchallsales:', error);
@@ -125,7 +131,7 @@ router.get('/invoices/seller/:vendedorId', async (req, res) => {
 //  - Guarda payment_method ('cash' | 'credit')
 //  - Guarda paid_at (si es contado se marca fecha de pago, si es crédito queda null)
 //  - Guarda detalle en ProductSales (si el modelo existe)
-//  - Envía correo con: vendedor, monto, tipo (crédito/contado), cliente, fecha, zona
+//  - Envía correo con: vendedor, monto, tipo, cliente, fecha, zona
 // Body esperado (flexible en items):
 // {
 //   invoice_number, date_time, customer_name, total, cash, change,
@@ -211,7 +217,6 @@ router.post('/addsale', async (req, res) => {
         : null;
 
       const commonCols = {
-        // agrega vendedor/cliente si tu tabla los tiene
         ...(ProductSale.rawAttributes?.vendedor_id ? { vendedor_id: vendedor_id ?? null } : {}),
         ...(ProductSale.rawAttributes?.customer_id ? { customer_id: customer_id ?? null } : {})
       };
@@ -219,7 +224,7 @@ router.post('/addsale', async (req, res) => {
       const rows = rawItems.map((it, idx) => {
         const product_id   = it.product_id ?? it.id ?? null;
         const product_name = it.product_name ?? it.name ?? it.title ?? '';
-        const quantity     = Number(it.quantity ?? it.qty ?? it.cantidad ?? 1);
+        the const quantity     = Number(it.quantity ?? it.qty ?? it.cantidad ?? 1);
         const unit_price   = Number(it.price ?? it.unit_price ?? it.precio ?? 0);
         const subtotal     = it.subtotal != null ? Number(it.subtotal) : Number((unit_price * quantity).toFixed(2));
 
@@ -404,7 +409,6 @@ router.delete('/deletesale/:invoice_number', async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // REGISTRAR PAGO (ABONO) A CRÉDITO
-//  - Ajustado para mantener consistencia con el backend previo
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/invoices/pay/:invoice_number', async (req, res) => {
   const t = await sequelize.transaction();
@@ -452,9 +456,7 @@ router.post('/invoices/pay/:invoice_number', async (req, res) => {
     // Registrar en Payments (si existe)
     try {
       if (Payment) {
-        const payload = {
-          amount: amt,
-        };
+        const payload = { amount: amt };
         if (Payment.rawAttributes?.created_at) payload.created_at = payAt;
         if (Payment.rawAttributes?.paid_at)     payload.paid_at     = payAt;
         if (Payment.rawAttributes?.invoice_id)  payload.invoice_id  = invoice.invoice_number;
@@ -475,7 +477,7 @@ router.post('/invoices/pay/:invoice_number', async (req, res) => {
     if (Invoice.rawAttributes?.balance) updates.balance = newBalance;
     if (newBalance === 0) {
       updates.paid_at = payAt;
-      if (method === 'credit') updates.total = absTotal; // poner en positivo
+      if (method === 'credit') updates.total = absTotal; // poner en positivo (consistencia UI)
     }
 
     await invoice.update(updates, { transaction: t });
@@ -541,4 +543,3 @@ router.post('/vendedor-stats', async (req, res) => {
 });
 
 module.exports = router;
-
