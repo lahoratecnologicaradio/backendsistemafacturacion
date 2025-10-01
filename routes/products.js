@@ -7,14 +7,35 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
-// Configurar multer para usar el volumen de Railway
+/* ────────────────────────────────────────────────────────────────────────────
+   Helpers
+   ──────────────────────────────────────────────────────────────────────────── */
+function nullIfEmpty(v) {
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim();
+  return s.length ? s : null;
+}
+function parseDec(n, def = 0) {
+  const v = parseFloat(n);
+  return Number.isFinite(v) ? v : def;
+}
+function parseIntSafe(n, def = 0) {
+  const v = parseInt(n, 10);
+  return Number.isFinite(v) ? v : def;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+   Multer / almacenamiento
+   ──────────────────────────────────────────────────────────────────────────── */
+// Carpeta base de imágenes en el filesystem del contenedor
+const BASE_IMG_DIR = '/imagenes';
+
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    const uploadPath = '/imagenes';
-    if (!fs.existsSync(uploadPath)) {
-      fs.mkdirSync(uploadPath, { recursive: true });
+    if (!fs.existsSync(BASE_IMG_DIR)) {
+      fs.mkdirSync(BASE_IMG_DIR, { recursive: true });
     }
-    cb(null, uploadPath);
+    cb(null, BASE_IMG_DIR);
   },
   filename: function (req, file, cb) {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
@@ -24,68 +45,62 @@ const storage = multer.diskStorage({
 });
 
 const upload = multer({
-  storage: storage,
-  limits: {
-    fileSize: 5 * 1024 * 1024
-  },
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
   fileFilter: (req, file, cb) => {
     const allowedTypes = /jpeg|jpg|png|gif|webp/;
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = allowedTypes.test(file.mimetype);
-
-    if (mimetype && extname) {
-      cb(null, true);
-    } else {
-      cb(new Error('Solo se permiten imágenes (JPEG, JPG, PNG, GIF, WEBP)'), false);
-    }
+    if (mimetype && extname) cb(null, true);
+    else cb(new Error('Solo se permiten imágenes (JPEG, JPG, PNG, GIF, WEBP)'), false);
   }
 });
 
-// Middleware para servir imágenes estáticas
-router.use('/images', express.static('/imagenes'));
+// Servir estáticos
+router.use('/images', express.static(BASE_IMG_DIR));
 
-// Función para generar la URL completa de la imagen
+// Construir URL pública
 const generateImageUrl = (req, filename) => {
   return `${req.protocol}://${req.get('host')}/api/products/images/${filename}`;
 };
 
-// ROUTE-1: Get All the Products
-router.get('/fetchallproducts', async (req, res) => {
+/* ────────────────────────────────────────────────────────────────────────────
+   ROUTE-1: Get All the Products
+   ──────────────────────────────────────────────────────────────────────────── */
+router.get('/fetchallproducts', async (_req, res) => {
   try {
-    const products = await Product.findAll({
-      order: [['createdAt', 'DESC']]
-    });
+    const products = await Product.findAll({ order: [['createdAt', 'DESC']] });
     res.json(products);
   } catch (error) {
-    console.error(error.message);
-    res.status(500).send("Internal Server Error");
+    console.error('fetchallproducts:', error.message);
+    res.status(500).send('Internal Server Error');
   }
 });
 
-// ROUTE-2: Add a new Product with image
+/* ────────────────────────────────────────────────────────────────────────────
+   ROUTE-2: Add a new Product with image
+   ──────────────────────────────────────────────────────────────────────────── */
 router.post('/addproduct', upload.single('image'), async (req, res) => {
   try {
-    const { 
-      product_name, 
-      brand_name, 
-      description, 
-      supplier_name, 
-      o_price, 
-      s_price, 
-      tax,           // NUEVO CAMPO TAX
-      qty, 
+    const {
+      product_name,
+      brand_name,
+      description,
+      supplier_name,
+      o_price,
+      s_price,
+      tax,
+      qty,
       unit_of_measure,
-      rec_date, 
-      exp_date, 
-      barcode, 
-      category 
+      rec_date,
+      exp_date,
+      barcode,
+      category
     } = req.body;
-    
+
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      if (req.file) {
-        fs.unlinkSync(req.file.path);
-      }
+      if (req.file) { try { fs.unlinkSync(req.file.path); } catch {} }
       return res.status(400).json({ errors: errors.array() });
     }
 
@@ -94,15 +109,16 @@ router.post('/addproduct', upload.single('image'), async (req, res) => {
       brand_name,
       description,
       supplier_name,
-      o_price: parseFloat(o_price),
-      s_price: parseFloat(s_price),
-      tax: parseFloat(tax) || 0.00,  // NUEVO CAMPO con valor por defecto
-      qty: parseInt(qty),
-      unit_of_measure: unit_of_measure || 'unidad',
+      o_price: parseDec(o_price),
+      s_price: parseDec(s_price),
+      tax: parseDec(tax, 0.0),
+      qty: parseIntSafe(qty),
+      unit_of_measure: (unit_of_measure || 'unidad'),
       rec_date,
       exp_date,
-      barcode,
-      category
+      // 🛡️ clave: tratar vacío como NULL para evitar ER_DUP_ENTRY por índice único
+      barcode: nullIfEmpty(barcode),
+      category: nullIfEmpty(category)
     };
 
     if (req.file) {
@@ -110,88 +126,95 @@ router.post('/addproduct', upload.single('image'), async (req, res) => {
     }
 
     const product = await Product.create(productData);
-    
+
     res.json({
       success: true,
       message: 'Producto agregado exitosamente',
-      product: product
+      product
     });
-
   } catch (error) {
     console.error('Error al agregar producto:', error);
-    
+
     if (req.file && fs.existsSync(req.file.path)) {
-      try {
-        fs.unlinkSync(req.file.path);
-      } catch (deleteError) {
+      try { fs.unlinkSync(req.file.path); } catch (deleteError) {
         console.error('Error al eliminar imagen:', deleteError);
       }
     }
-    
+
+    // Manejo específico de duplicado (ej. UNIQUE barcode)
+    if (error?.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({
+        success: false,
+        message: 'Ya existe otro producto con ese código de barras (barcode).',
+        detail: error.sqlMessage
+      });
+    }
+
     res.status(500).json({
       success: false,
-      message: "Internal Server Error",
+      message: 'Internal Server Error',
       error: process.env.NODE_ENV === 'development' ? error.message : null
     });
   }
 });
 
-// ROUTE-3: Update a Product
+/* ────────────────────────────────────────────────────────────────────────────
+   ROUTE-3: Update a Product
+   ──────────────────────────────────────────────────────────────────────────── */
 router.put('/updateproduct/:id', upload.single('image'), async (req, res) => {
   try {
-    // CONVERTIR EL ID A NÚMERO - SOLUCIÓN AL PROBLEMA
-    const productId = parseInt(req.params.id);
-    
-    // Debug: verificar el ID recibido y parseado
+    const productId = parseIntSafe(req.params.id, NaN);
+
     console.log('🔍 ID recibido:', req.params.id, 'Tipo:', typeof req.params.id);
     console.log('🔢 ID parseado:', productId, 'Tipo:', typeof productId);
-    
-    // Buscar el producto con el ID convertido a número
-    let product = await Product.findByPk(productId);
-    
-    // Si no se encuentra, intentar buscar como string (por si acaso)
+
+    let product = Number.isFinite(productId)
+      ? await Product.findByPk(productId)
+      : null;
+
     if (!product) {
       console.log('⚠️  No encontrado como número, intentando como string...');
-      product = await Product.findByPk(req.params.id); // Intentar como string
+      product = await Product.findByPk(req.params.id);
     }
-    
+
     if (!product) {
-      // Debug: obtener todos los productos para verificar los IDs existentes
-      const allProducts = await Product.findAll();
-      const availableIds = allProducts.map(p => ({ id: p.id, type: typeof p.id, name: p.product_name }));
-      
+      const allProducts = await Product.findAll({ attributes: ['id', 'product_name'] });
+      const availableIds = allProducts.map(p => ({ id: p.id, name: p.product_name }));
       console.log('❌ Producto no encontrado. IDs disponibles:', availableIds);
-      
-      return res.status(404).json({ 
+
+      if (req.file && fs.existsSync(req.file.path)) {
+        try { fs.unlinkSync(req.file.path); } catch {}
+      }
+
+      return res.status(404).json({
         success: false,
-        message: "Product not found",
+        message: 'Product not found',
         debug: {
           receivedId: req.params.id,
-          receivedType: typeof req.params.id,
           parsedId: productId,
-          parsedType: typeof productId,
-          availableIds: allProducts.map(p => p.id),
           availableProducts: availableIds
         }
       });
     }
 
     console.log('✅ Producto encontrado:', product.product_name);
-    
-    const { 
-      product_name, 
-      brand_name, 
-      description, 
-      supplier_name, 
-      o_price, 
-      s_price, 
+
+    const {
+      product_name,
+      brand_name,
+      description,
+      supplier_name,
+      o_price,
+      s_price,
       tax,
-      qty, 
+      qty,
       unit_of_measure,
-      rec_date, 
-      exp_date, 
-      barcode, 
-      category 
+      rec_date,
+      exp_date,
+      barcode,
+      category,
+      // opcional: si quieres limpiar barcode explícitamente desde el cliente
+      force_clear_barcode
     } = req.body;
 
     const updateData = {};
@@ -199,23 +222,34 @@ router.put('/updateproduct/:id', upload.single('image'), async (req, res) => {
     if (brand_name !== undefined) updateData.brand_name = brand_name;
     if (supplier_name !== undefined) updateData.supplier_name = supplier_name;
     if (description !== undefined) updateData.description = description;
-    if (o_price !== undefined) updateData.o_price = parseFloat(o_price);
-    if (s_price !== undefined) updateData.s_price = parseFloat(s_price);
-    if (tax !== undefined) updateData.tax = parseFloat(tax);
-    if (qty !== undefined) updateData.qty = parseInt(qty);
+    if (o_price !== undefined) updateData.o_price = parseDec(o_price);
+    if (s_price !== undefined) updateData.s_price = parseDec(s_price);
+    if (tax !== undefined) updateData.tax = parseDec(tax);
+    if (qty !== undefined) updateData.qty = parseIntSafe(qty);
     if (unit_of_measure !== undefined) updateData.unit_of_measure = unit_of_measure;
     if (rec_date !== undefined) updateData.rec_date = rec_date;
     if (exp_date !== undefined) updateData.exp_date = exp_date;
-    if (barcode !== undefined) updateData.barcode = barcode;
-    if (category !== undefined) updateData.category = category;
+
+    // 🛡️ barcode/category: '' → NULL
+    if (barcode !== undefined) {
+      const sanitized = nullIfEmpty(barcode);
+      if (sanitized === null && !force_clear_barcode) {
+        // Si viene vacío pero NO queremos limpiar, no tocar barcode
+      } else {
+        updateData.barcode = sanitized; // puede ser string o NULL si force_clear_barcode
+      }
+    }
+    if (category !== undefined) updateData.category = nullIfEmpty(category);
 
     console.log('📝 Datos a actualizar:', updateData);
 
+    // Imagen nueva
     if (req.file) {
       console.log('🖼️  Imagen recibida:', req.file.filename);
+      // Borramos la anterior si existía
       if (product.image) {
         const filename = product.image.split('/').pop();
-        const oldImagePath = path.join('/imagenes', filename);
+        const oldImagePath = path.join(BASE_IMG_DIR, filename);
         if (fs.existsSync(oldImagePath)) {
           try {
             fs.unlinkSync(oldImagePath);
@@ -225,32 +259,27 @@ router.put('/updateproduct/:id', upload.single('image'), async (req, res) => {
           }
         }
       }
-      
       updateData.image = generateImageUrl(req, req.file.filename);
     }
 
     await product.update(updateData);
     console.log('✅ Producto actualizado en la base de datos');
 
-    // Obtener el producto actualizado para devolverlo
-    const updatedProduct = await Product.findByPk(productId);
-    
-    // Si no encuentra el producto actualizado, intentar con el ID string
-    if (!updatedProduct) {
-      console.log('⚠️  No se pudo obtener producto actualizado con número, intentando con string...');
-      updatedProduct = await Product.findByPk(req.params.id);
-    }
+    // Volver a leer el producto (manejar ambos tipos de id)
+    let updatedProduct = Number.isFinite(productId)
+      ? await Product.findByPk(productId)
+      : await Product.findByPk(req.params.id);
 
     res.json({
       success: true,
       message: 'Producto actualizado exitosamente',
-      product: updatedProduct
+      product: updatedProduct || product
     });
 
   } catch (error) {
     console.error('❌ Error al actualizar producto:', error);
     console.error('🔍 Stack trace:', error.stack);
-    
+
     if (req.file && fs.existsSync(req.file.path)) {
       try {
         fs.unlinkSync(req.file.path);
@@ -259,31 +288,37 @@ router.put('/updateproduct/:id', upload.single('image'), async (req, res) => {
         console.error('Error al eliminar nueva imagen:', deleteError);
       }
     }
-    
+
+    if (error?.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({
+        success: false,
+        message: 'Ya existe otro producto con ese código de barras (barcode).',
+        detail: error.sqlMessage
+      });
+    }
+
     res.status(500).json({
       success: false,
-      message: "Internal Server Error",
+      message: 'Internal Server Error',
       error: process.env.NODE_ENV === 'development' ? error.message : null,
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
 
-// ROUTE-4: Delete a Product
+/* ────────────────────────────────────────────────────────────────────────────
+   ROUTE-4: Delete a Product
+   ──────────────────────────────────────────────────────────────────────────── */
 router.delete('/deleteproduct/:id', async (req, res) => {
   try {
     const product = await Product.findByPk(req.params.id);
-    if (!product) {
-      return res.status(404).json({ message: "Product not found" });
-    }
+    if (!product) return res.status(404).json({ message: 'Product not found' });
 
     if (product.image) {
       const filename = product.image.split('/').pop();
-      const imagePath = path.join('/imagenes', filename);
+      const imagePath = path.join(BASE_IMG_DIR, filename);
       if (fs.existsSync(imagePath)) {
-        try {
-          fs.unlinkSync(imagePath);
-        } catch (deleteError) {
+        try { fs.unlinkSync(imagePath); } catch (deleteError) {
           console.error('Error al eliminar imagen:', deleteError);
         }
       }
@@ -293,78 +328,66 @@ router.delete('/deleteproduct/:id', async (req, res) => {
 
     res.json({
       success: true,
-      message: "Producto eliminado exitosamente",
-      product: product
+      message: 'Producto eliminado exitosamente',
+      product
     });
-
   } catch (error) {
-    console.error(error.message);
+    console.error('deleteproduct:', error.message);
     res.status(500).json({
       success: false,
-      message: "Internal Server Error",
+      message: 'Internal Server Error',
       error: process.env.NODE_ENV === 'development' ? error.message : null
     });
   }
 });
 
-// ROUTE-5: Get Product by Name
+/* ────────────────────────────────────────────────────────────────────────────
+   ROUTE-5: Get Product by Name
+   ──────────────────────────────────────────────────────────────────────────── */
 router.get('/getproductByName/:name', async (req, res) => {
   try {
-    const searchTerm = req.params.name.trim();
-    
+    const searchTerm = (req.params.name || '').trim();
+
     if (!searchTerm || searchTerm.length < 2) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        message: "Por favor ingrese al menos 2 caracteres para la búsqueda" 
+        message: 'Por favor ingrese al menos 2 caracteres para la búsqueda'
       });
     }
 
     const products = await Product.findAll({
-      where: {
-        product_name: {
-          [Op.like]: `${searchTerm}%`
-        }
-      },
+      where: { product_name: { [Op.like]: `${searchTerm}%` } },
       limit: 20,
       order: [['product_name', 'ASC']]
     });
 
     if (products.length === 0) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        message: "No se encontraron productos con ese nombre" 
+        message: 'No se encontraron productos con ese nombre'
       });
     }
 
-    res.json({
-      success: true,
-      count: products.length,
-      products
-    });
-
+    res.json({ success: true, count: products.length, products });
   } catch (error) {
     console.error('Error en búsqueda de productos:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      message: "Error interno al buscar productos",
+      message: 'Error interno al buscar productos',
       error: process.env.NODE_ENV === 'development' ? error.message : null
     });
   }
 });
 
-// Ruta para servir imágenes
+/* ────────────────────────────────────────────────────────────────────────────
+   Ruta para servir imágenes
+   ──────────────────────────────────────────────────────────────────────────── */
 router.get('/images/:filename', (req, res) => {
   const filename = req.params.filename;
-  const imagePath = path.join('/imagenes', filename);
-  
-  if (fs.existsSync(imagePath)) {
-    res.sendFile(imagePath);
-  } else {
-    res.status(404).json({ 
-      success: false,
-      message: "Imagen no encontrada" 
-    });
-  }
+  const imagePath = path.join(BASE_IMG_DIR, filename);
+
+  if (fs.existsSync(imagePath)) return res.sendFile(imagePath);
+  return res.status(404).json({ success: false, message: 'Imagen no encontrada' });
 });
 
 module.exports = router;
