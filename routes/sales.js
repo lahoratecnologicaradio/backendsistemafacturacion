@@ -602,7 +602,7 @@ router.post('/invoices/pay/:invoice_number', async (req, res) => {
     }
 
     const newPaid = alreadyPaid + amt;
-    the const newBalance = Math.max(absTotal - newPaid, 0);
+    const newBalance = Math.max(absTotal - newPaid, 0);
 
     const updates = { paid_amount: newPaid };
     if (Invoice.rawAttributes?.balance) updates.balance = newBalance;
