@@ -673,4 +673,142 @@ router.post('/vendedor-stats', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// VENTAS DE UN DÍA ESPECÍFICO
+// GET /sales/by-day?date=YYYY-MM-DD[&vendedor_id=##]
+// GET /sales/day/:date              (misma lógica por parámetro de ruta)
+// Nota: Usa el huso horario del servidor; si necesitas TZ fijo, pásalo ya convertido.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get(['/sales/by-day', '/sales/day/:date'], async (req, res) => {
+  try {
+    // 1) Tomamos la fecha desde query o params
+    const dateStr = (req.query.date || req.params.date || '').trim();
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      return res.status(400).json({
+        success: false,
+        error: "Parámetro 'date' inválido. Formato esperado: YYYY-MM-DD"
+      });
+    }
+
+    // 2) Construimos rango [inicio, fin] del día
+    //    Si prefieres forzar horario de RD, transforma el string a UTC según tu server.
+    const start = new Date(`${dateStr}T00:00:00.000`);
+    const end   = new Date(`${dateStr}T23:59:59.999`);
+
+    // 3) Filtro opcional por vendedor
+    const vendedorId = req.query.vendedor_id != null ? String(req.query.vendedor_id).trim() : null;
+
+    // 4) Agregados rápidos (SQL crudo para portabilidad y performance)
+    const paramsAgg = [start, end];
+    let whereAgg = 'WHERE date_time BETWEEN ? AND ?';
+    if (vendedorId) {
+      whereAgg += ' AND COALESCE(vendedor_id, 0) = ?';
+      paramsAgg.push(vendedorId);
+    }
+
+    const aggSql = `
+      SELECT
+        COUNT(*)                                                AS cantidad_facturas,
+        SUM(ABS(COALESCE(total,0)))                             AS total_ventas,
+        SUM(CASE WHEN LOWER(COALESCE(payment_method,''))='cash'
+                 THEN ABS(COALESCE(total,0)) ELSE 0 END)        AS total_contado,
+        SUM(CASE WHEN LOWER(COALESCE(payment_method,''))='credit'
+                 THEN ABS(COALESCE(total,0)) ELSE 0 END)        AS total_credito,
+        SUM(COALESCE(paid_amount,0))                            AS total_pagado,
+        SUM(CASE WHEN LOWER(COALESCE(payment_method,''))='credit'
+                 THEN GREATEST(ABS(COALESCE(total,0)) - COALESCE(paid_amount,0), 0)
+                 ELSE 0 END)                                    AS balance_pendiente
+      FROM invoices
+      ${whereAgg}
+    `;
+
+    const [agg] = await sequelize.query(aggSql, {
+      replacements: paramsAgg,
+      type: QueryTypes.SELECT
+    });
+
+    // 5) Listado de facturas del día (normalizado: total en positivo)
+    const whereList = {
+      date_time: { [sequelize.Op.between]: [start, end] }
+    };
+    if (vendedorId) whereList.vendedor_id = vendedorId;
+
+    const rows = await Invoice.findAll({
+      where: whereList,
+      order: [['date_time', 'DESC']],
+      attributes: {
+        include: [
+          [sequelize.literal('ABS(COALESCE(total,0))'), 'abs_total'],
+          [
+            sequelize.literal(
+              "CASE WHEN LOWER(COALESCE(payment_method,''))='credit' " +
+              "THEN GREATEST(ABS(COALESCE(total,0)) - COALESCE(paid_amount,0), 0) " +
+              "ELSE 0 END"
+            ),
+            'balance'
+          ]
+        ]
+      },
+      raw: true
+    });
+
+    const facturas = rows.map(r => ({
+      ...r,
+      total: Number(r.abs_total ?? r.total ?? 0),
+      balance: Number(r.balance ?? 0)
+    }));
+
+    // 6) (Opcional) Desglose por vendedor para ese día
+    const paramsVend = [start, end];
+    let whereVend = 'WHERE date_time BETWEEN ? AND ?';
+    if (vendedorId) {
+      whereVend += ' AND COALESCE(vendedor_id, 0) = ?';
+      paramsVend.push(vendedorId);
+    }
+    const bySellerSql = `
+      SELECT
+        COALESCE(vendedor_id, 0)                                AS vendedor_id,
+        COUNT(invoice_number)                                   AS cantidad_ventas,
+        SUM(ABS(COALESCE(total,0)))                             AS total_ventas,
+        SUM(CASE WHEN LOWER(COALESCE(payment_method,''))='cash'
+                 THEN ABS(COALESCE(total,0)) ELSE 0 END)        AS total_contado,
+        SUM(CASE WHEN LOWER(COALESCE(payment_method,''))='credit'
+                 THEN ABS(COALESCE(total,0)) ELSE 0 END)        AS total_credito,
+        SUM(COALESCE(paid_amount,0))                            AS total_pagado,
+        SUM(CASE WHEN LOWER(COALESCE(payment_method,''))='credit'
+                 THEN GREATEST(ABS(COALESCE(total,0)) - COALESCE(paid_amount,0), 0)
+                 ELSE 0 END)                                    AS balance_pendiente
+      FROM invoices
+      ${whereVend}
+      GROUP BY COALESCE(vendedor_id, 0)
+      ORDER BY total_ventas DESC
+    `;
+    const breakdown = await sequelize.query(bySellerSql, {
+      replacements: paramsVend,
+      type: QueryTypes.SELECT
+    });
+
+    return res.json({
+      success: true,
+      date: dateStr,
+      filter: { vendedor_id: vendedorId ?? null },
+      summary: {
+        cantidad_facturas: Number(agg?.cantidad_facturas || 0),
+        total_ventas: Number(agg?.total_ventas || 0),
+        total_contado: Number(agg?.total_contado || 0),
+        total_credito: Number(agg?.total_credito || 0),
+        total_pagado: Number(agg?.total_pagado || 0),
+        balance_pendiente: Number(agg?.balance_pendiente || 0)
+      },
+      by_seller: breakdown,
+      invoices: facturas
+    });
+  } catch (error) {
+    console.error('❌ sales/by-day:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener ventas del día', details: error.message });
+  }
+});
+
+
 module.exports = router;
