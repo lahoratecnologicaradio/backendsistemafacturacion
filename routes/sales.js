@@ -679,7 +679,7 @@ router.post('/vendedor-stats', async (req, res) => {
 // GET /sales/day/:date              (misma lógica por parámetro de ruta)
 // Nota: Usa el huso horario del servidor; si necesitas TZ fijo, pásalo ya convertido.
 // ─────────────────────────────────────────────────────────────────────────────
-router.get(['/sales/by-day', '/sales/day/:date'], async (req, res) => {
+router.get(['/by-day', '/day/:date'], async (req, res) => {
   try {
     // 1) Tomamos la fecha desde query o params
     const dateStr = (req.query.date || req.params.date || '').trim();
