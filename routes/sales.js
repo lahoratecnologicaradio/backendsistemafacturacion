@@ -810,5 +810,85 @@ router.get(['/by-day', '/day/:date'], async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ÚLTIMOS N PEDIDOS (por defecto 5)
+// GET /invoices/latest            → últimos 5
+// GET /invoices/latest?limit=10   → últimos 10 (tope 50)
+// Devuelve: cliente, vendedor, método, total(+), pagado, balance, estado_credito
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/invoices/latest', async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(Number(req.query.limit) || 5, 50));
+
+    // Traemos las últimas facturas
+    const rows = await Invoice.findAll({
+      order: [['date_time', 'DESC']],
+      limit,
+      attributes: {
+        include: [
+          // total siempre positivo para UI
+          [sequelize.literal('ABS(COALESCE(total,0))'), 'abs_total']
+        ]
+      },
+      raw: true
+    });
+
+    // Map de vendedores (si existe el modelo)
+    let vendedorById = {};
+    try {
+      if (Vendedor) {
+        const ids = [...new Set(rows.map(r => r.vendedor_id).filter(v => v != null))];
+        if (ids.length > 0) {
+          // Asumimos PK = id y columna nombre = 'nombre'
+          const vendedores = await Vendedor.findAll({
+            where: { id: ids },
+            attributes: ['id', 'nombre'],
+            raw: true
+          });
+          vendedorById = Object.fromEntries(vendedores.map(v => [v.id, v.nombre]));
+        }
+      }
+    } catch (e) {
+      console.warn('[invoices/latest] No se pudo cargar Vendedor:', e?.message);
+    }
+
+    const data = rows.map(r => {
+      const method = String(r.payment_method || 'cash').toLowerCase();
+      const total = Number(r.abs_total ?? r.total ?? 0);
+      const paid  = Number(r.paid_amount || 0);
+      const balance = method === 'credit' ? Math.max(total - paid, 0) : 0;
+
+      let estado_credito = 'contado';
+      if (method === 'credit') {
+        estado_credito = balance <= 0 ? 'crédito pagado' : 'crédito pendiente';
+      }
+
+      return {
+        invoice_number: r.invoice_number,
+        date_time: r.date_time,
+        customer_name: r.customer_name,                       // nombre del cliente
+        vendedor_id: r.vendedor_id ?? null,
+        vendedor_nombre: vendedorById[r.vendedor_id]          // nombre del vendedor (si existe)
+          ?? (r.vendedor_id ? `ID ${r.vendedor_id}` : null),
+        payment_method: method,
+        total,
+        paid_amount: paid,
+        balance,                                              // monto pendiente (si crédito)
+        estado_credito                                       // contado | crédito pagado | crédito pendiente
+      };
+    });
+
+    res.json({ success: true, limit, data });
+  } catch (error) {
+    console.error('❌ invoices/latest:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al obtener los últimos pedidos',
+      details: error.message
+    });
+  }
+});
+
+
 module.exports = router;
 
