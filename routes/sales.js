@@ -5,7 +5,7 @@ const express = require('express');
 const router = express.Router();
 const { validationResult } = require('express-validator');
 const { sequelize } = require('../db');
-const { QueryTypes } = require('sequelize');
+const { QueryTypes, Op } = require('sequelize'); // ← AÑADIDO Op
 const nodemailer = require('nodemailer');
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -602,7 +602,7 @@ router.post('/invoices/pay/:invoice_number', async (req, res) => {
     }
 
     const newPaid = alreadyPaid + amt;
-    const newBalance = Math.max(absTotal - newPaid, 0);
+    the const newBalance = Math.max(absTotal - newPaid, 0);
 
     const updates = { paid_amount: newPaid };
     if (Invoice.rawAttributes?.balance) updates.balance = newBalance;
@@ -730,7 +730,7 @@ router.get(['/by-day', '/day/:date'], async (req, res) => {
 
     // 5) Listado de facturas del día (normalizado: total en positivo)
     const whereList = {
-      date_time: { [sequelize.Op.between]: [start, end] }
+      date_time: { [Op.between]: [start, end] } // ← USO DE Op EN LUGAR DE sequelize.Op
     };
     if (vendedorId) whereList.vendedor_id = vendedorId;
 
@@ -810,5 +810,5 @@ router.get(['/by-day', '/day/:date'], async (req, res) => {
   }
 });
 
-
 module.exports = router;
+
