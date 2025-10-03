@@ -50,7 +50,7 @@ function todayYMDLocal() {
 function normalizeToYMD(input) {
   if (!input) return null;
   if (/^\d{4}-\d{2}-\d{2}$/.test(input)) return input;
-  const m = input.match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/);
+  const m = String(input).match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/);
   if (m) {
     const [, dd, mm, yyyy] = m;
     return `${yyyy}-${mm}-${dd}`;
@@ -66,27 +66,38 @@ function normalizeToYMD(input) {
   return null;
 }
 
-// Valida una URL básica de YouTube (youtube.com/watch?v=... | youtu.be/...)
+/* ========================= *
+ *  Helpers de YouTube URL   *
+ * ========================= */
+
+// Valida una URL de YouTube (watch?v=..., shorts/ID, embed/ID, youtu.be/ID)
 function isValidYouTubeUrl(url) {
   try {
-    const u = new URL(url);
-    const host = u.hostname.replace(/^www\./, '');
-    const isYT = host === 'youtube.com' || host === 'youtu.be';
-    if (!isYT) return false;
+    const u = new URL(String(url));
+    const host = u.hostname.replace(/^www\./i, '').toLowerCase();
+    if (!['youtube.com', 'youtu.be'].includes(host)) return false;
 
     if (host === 'youtu.be') {
-      return u.pathname && u.pathname.length > 1; // /VIDEOID
+      const id = u.pathname.split('/').filter(Boolean)[0];
+      return Boolean(id);
     }
-    if (host === 'youtube.com') {
-      return Boolean(u.searchParams.get('v')) || u.pathname.startsWith('/embed/');
-    }
+
+    const path = u.pathname.toLowerCase();
+    const v = u.searchParams.get('v');
+    if (v) return true;                       // /watch?v=ID
+    if (path.startsWith('/shorts/')) return true; // /shorts/ID
+    if (path.startsWith('/embed/')) return true;  // /embed/ID
     return false;
   } catch {
     return false;
   }
 }
+const normalizeActive = (v) => (Number(v) ? 1 : 0);
 
-// Include común (cliente, vendedor, resultado)
+/* =============================== *
+ * Include común en otras rutas    *
+ * =============================== */
+
 const COMMON_INCLUDE = [
   { model: Customer,  as: 'cliente',  attributes: ['id','full_name','address','c_number'] },
   { model: Vendedor,  as: 'vendedor', attributes: ['id','nombre'] },
@@ -121,40 +132,50 @@ const dateLocalEquals = (col, ymd) => literal(
  * NUEVAS RUTAS: Capacitación                                *
  * ========================================================= */
 
-// GET: lista de videos activos (array plano)
+/**
+ * GET /visitas/capacitacion
+ * Devuelve un arreglo plano con los videos activos:
+ * [
+ *   { id, titulo, url, orden, is_active }
+ * ]
+ */
 router.get('/capacitacion', async (_req, res) => {
   try {
-    if (TrainingVideo) {
-      const rows = await TrainingVideo.findAll({
-        where: { is_active: 1 },
-        attributes: ['id', 'titulo', 'url', 'orden', 'is_active'],
-        order: [['orden', 'ASC'], ['id', 'ASC']],
-      });
-
-      const list = rows.map(r => ({
-        id: r.id,
-        titulo: r.titulo,
-        url: r.url,
-        orden: r.orden ?? 0,
-        is_active: r.is_active ? 1 : 0,
-      }));
-
-      return res.json(list); // arreglo directo
+    if (!TrainingVideo) {
+      console.warn('[visitas] TrainingVideo no disponible; devolviendo fallback.');
+      return res.json([
+        { id: 1, titulo: 'Cómo hacer un pedido', url: 'https://youtu.be/O-rhnxV6qRc?si=DaUcwAFPCrZHTsvJ', orden: 1, is_active: 1 },
+        { id: 2, titulo: 'Cómo cobrar una factura', url: 'https://youtube.com/shorts/rzsKc3G9wvs?si=6CuOtSJbd4Pk1jSu', orden: 2, is_active: 1 },
+      ]);
     }
 
-    // Fallback sin modelo (ejemplos)
-    const fallback = [
-      { id: 1, titulo: 'Cómo hacer un pedido', url: 'https://youtu.be/O-rhnxV6qRc?si=DaUcwAFPCrZHTsvJ', orden: 1, is_active: 1 },
-      { id: 2, titulo: 'Cómo cobrar una factura', url: 'https://youtube.com/shorts/rzsKc3G9wvs?si=6CuOtSJbd4Pk1jSu', orden: 2, is_active: 1 },
-    ];
-    return res.json(fallback);
+    const rows = await TrainingVideo.findAll({
+      where: { is_active: 1 },
+      attributes: ['id', 'titulo', 'url', 'orden', 'is_active'],
+      order: [['orden', 'ASC'], ['id', 'ASC']],
+    });
+
+    const list = rows.map(r => ({
+      id: r.id,
+      titulo: r.titulo,
+      url: r.url,
+      orden: r.orden ?? 0,
+      is_active: r.is_active ? 1 : 0,
+    }));
+
+    return res.json(list);
   } catch (e) {
     console.error('GET /visitas/capacitacion ERROR =>', e);
-    return res.status(200).json([]); // el front tolera arreglo vacío
+    // el front tolera arreglo vacío
+    return res.status(200).json([]);
   }
 });
 
-// POST: crear video de capacitación
+/**
+ * POST /visitas/capacitacion
+ * Crea un video de capacitación. Body:
+ * { titulo: string, url: string, orden?: number, is_active?: 0|1 }
+ */
 router.post('/capacitacion', async (req, res) => {
   try {
     if (!TrainingVideo) {
@@ -162,8 +183,9 @@ router.post('/capacitacion', async (req, res) => {
     }
 
     const { titulo, url, orden, is_active } = req.body || {};
-    if (!titulo || !url) {
-      return res.status(400).json({ success: false, message: 'Campos requeridos: titulo, url.' });
+
+    if (!titulo || !String(titulo).trim() || !url || !String(url).trim()) {
+      return res.status(400).json({ success: false, message: 'Campos requeridos: titulo y url.' });
     }
     if (!isValidYouTubeUrl(String(url))) {
       return res.status(400).json({ success: false, message: 'URL de YouTube inválida.' });
@@ -172,10 +194,9 @@ router.post('/capacitacion', async (req, res) => {
     const payload = {
       titulo: String(titulo).trim(),
       url: String(url).trim(),
+      orden: (orden !== undefined && !Number.isNaN(Number(orden))) ? Number(orden) : null,
+      is_active: (is_active !== undefined) ? normalizeActive(is_active) : 1,
     };
-
-    if (orden !== undefined && !Number.isNaN(Number(orden))) payload.orden = Number(orden);
-    if (is_active !== undefined) payload.is_active = Number(is_active) ? 1 : 0;
 
     const created = await TrainingVideo.create(payload);
 
@@ -190,6 +211,13 @@ router.post('/capacitacion', async (req, res) => {
       },
     });
   } catch (e) {
+    // Duplicados (único por titulo+url)
+    if (e?.name === 'SequelizeUniqueConstraintError') {
+      return res.status(409).json({
+        success: false,
+        message: 'Ya existe un video con ese título y URL.'
+      });
+    }
     console.error('POST /visitas/capacitacion ERROR =>', e);
     return res.status(500).json({ success: false, message: 'Error interno del servidor' });
   }
@@ -437,10 +465,6 @@ router.get('/historial/:vendedorId', async (req, res) => {
 
 /* ========================================================= *
  * 7) Cobros por día (lo cobrado = paid_amount del día RD)   *
- *    Une sin doble conteo:
- *      A) FECHA LOCAL RD de date_time y paid_amount>0
- *      B) FECHA LOCAL RD de paid_at    y paid_amount>0
- *    Monto por detalle = paid_amount; método según payment_method
  * ========================================================= */
 router.get('/cobros/:vendedorId/:fecha', async (req, res) => {
   try {
@@ -745,6 +769,5 @@ router.delete('/:id', async (req, res) => {
 });
 
 module.exports = router;
-
 
 
