@@ -19,6 +19,7 @@ const Customer = sequelize.define('Customer', {
     type: DataTypes.STRING
   },
   c_number: {
+    // Nota: si vas a almacenar +, guiones, etc., considera cambiar a STRING.
     type: DataTypes.BIGINT
   },
   note: {
@@ -34,11 +35,21 @@ const Customer = sequelize.define('Customer', {
     type: DataTypes.INTEGER,
     allowNull: true,
     references: {
-      model: 'vendedores', // Nombre de la tabla de vendedores
+      model: 'vendedores',
       key: 'id'
     },
     onUpdate: 'CASCADE',
     onDelete: 'SET NULL'
+  },
+
+  // ⬇️ NUEVOS CAMPOS
+  rnc: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  contacto: {
+    type: DataTypes.STRING,
+    allowNull: true
   }
 }, {
   tableName: 'customers',
@@ -46,7 +57,6 @@ const Customer = sequelize.define('Customer', {
   underscored: false
 });
 
-// Si necesitas definir asociaciones (opcional pero recomendado)
 Customer.associate = function(models) {
   Customer.belongsTo(models.Vendedor, {
     foreignKey: 'vendedor_id',
