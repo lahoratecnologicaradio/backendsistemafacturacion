@@ -1,3 +1,5 @@
+
+
 // routes/sales.js
 'use strict';
 
@@ -5,7 +7,7 @@ const express = require('express');
 const router = express.Router();
 const { validationResult } = require('express-validator');
 const { sequelize } = require('../db');
-const { QueryTypes, Op } = require('sequelize'); // ← AÑADIDO Op
+const { QueryTypes, Op } = require('sequelize');
 const nodemailer = require('nodemailer');
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -445,7 +447,6 @@ router.post('/addsale', async (req, res) => {
   }
 });
 
-
 // ─────────────────────────────────────────────────────────────────────────────
 // OBTENER POR invoice_number
 // ─────────────────────────────────────────────────────────────────────────────
@@ -546,7 +547,7 @@ router.put('/updatesale/:invoice_number', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ELIMINAR POR invoice_number (borra también el detalle productsales)
+/** ELIMINAR POR invoice_number (borra también el detalle productsales) */
 // ─────────────────────────────────────────────────────────────────────────────
 router.delete('/deletesale/:invoice_number', async (req, res) => {
   const t = await sequelize.transaction();
@@ -612,7 +613,7 @@ router.post('/invoices/pay/:invoice_number', async (req, res) => {
     }
 
     const rawTotal = Number(invoice.total) || 0;
-    const absTotal = Math.abs(rawTotal);
+    the const absTotal = Math.abs(rawTotal);
     const alreadyPaid = Number(invoice.paid_amount || 0);
     const currentBalance = Math.max(absTotal - alreadyPaid, 0);
 
@@ -929,5 +930,3 @@ router.get('/invoices/latest', async (req, res) => {
 });
 
 module.exports = router;
-
-
