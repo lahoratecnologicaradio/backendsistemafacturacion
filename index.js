@@ -489,6 +489,7 @@ const defineAssociations = () => {
 };
 
 // ====== Rutas de tu API ======
+app.use('/api/vendor-expenses', require('./routes/vendorExpenses'));
 app.use('/api/products', require('./routes/products'));
 app.use('/api/customers', require('./routes/customers'));
 app.use('/api/suppliers', require('./routes/suppliers'));
