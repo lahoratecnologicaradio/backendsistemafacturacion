@@ -1,5 +1,3 @@
-
-
 // routes/sales.js
 'use strict';
 
@@ -183,7 +181,7 @@ router.get('/invoices/seller/:vendedorId', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CREAR FACTURA + actualizar qty + email
+// CREAR FACTURA + guardar detalle productsales + actualizar qty + email
 // Body:
 // {
 //   invoice_number, date_time, customer_name, total, cash, change,
@@ -906,15 +904,15 @@ router.get('/invoices/latest', async (req, res) => {
       return {
         invoice_number: r.invoice_number,
         date_time: r.date_time,
-        customer_name: r.customer_name,                       // nombre del cliente
+        customer_name: r.customer_name,
         vendedor_id: r.vendedor_id ?? null,
-        vendedor_nombre: vendedorById[r.vendedor_id]          // nombre del vendedor (si existe)
+        vendedor_nombre: vendedorById[r.vendedor_id]
           ?? (r.vendedor_id ? `ID ${r.vendedor_id}` : null),
         payment_method: method,
         total,
         paid_amount: paid,
-        balance,                                              // monto pendiente (si crédito)
-        estado_credito                                       // contado | crédito pagado | crédito pendiente
+        balance,
+        estado_credito
       };
     });
 
