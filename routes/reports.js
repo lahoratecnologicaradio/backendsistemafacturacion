@@ -1,545 +1,932 @@
+// routes/sales.js
+'use strict';
+
 const express = require('express');
 const router = express.Router();
-const { Op, fn, col, literal, QueryTypes } = require('sequelize');
+const { validationResult } = require('express-validator');
 const { sequelize } = require('../db');
-const { Invoice, Productsale } = require('../models/Report');
+const { QueryTypes, Op } = require('sequelize'); // ← AÑADIDO Op
+const nodemailer = require('nodemailer');
 
-/* ============================
- * Helpers de fecha RD
- * ============================ */
+// ─────────────────────────────────────────────────────────────────────────────
+// MODELOS
+// ─────────────────────────────────────────────────────────────────────────────
+const Invoice = require('../models/Invoice'); // PK: invoice_number
 
-// Devuelve la fecha YYYY-MM-DD en zona RD
-function ymdRD(date = new Date()) {
-  const tzDate = new Date(date.toLocaleString('en-US', { timeZone: 'America/Santo_Domingo' }));
-  const y = tzDate.getFullYear();
-  const m = String(tzDate.getMonth() + 1).padStart(2, '0');
-  const d = String(tzDate.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
-
-// Devuelve límites del día (inicio y fin) en RD como objetos Date con offset -04:00
-function rdDayBounds(date = new Date()) {
-  const tzDate = new Date(date.toLocaleString('en-US', { timeZone: 'America/Santo_Domingo' }));
-  const y = tzDate.getFullYear();
-  const m = String(tzDate.getMonth() + 1).padStart(2, '0');
-  const d = String(tzDate.getDate()).padStart(2, '0');
-
-  // Construimos Date con offset RD (-04:00). Si tu DB guarda DATETIME sin TZ, esto acota correctamente por RD.
-  const start = new Date(`${y}-${m}-${d}T00:00:00-04:00`);
-  const end   = new Date(`${y}-${m}-${d}T23:59:59.999-04:00`);
-  return { start, end };
-}
-
-/* ============================================
- * RUTA NUEVA 1: Ventas del día (RD)
- * GET /api/reports/today
- *   -> Lista de facturas de hoy + productos
- *   Query opcional: ?withProducts=0/1 (1 por defecto)
- * ============================================ */
-router.get('/today', async (req, res) => {
+let ProductSale = null;
+try {
+  ProductSale = require('../models/ProductSale');     // singular
+} catch (_e1) {
   try {
-    const { start, end } = rdDayBounds(new Date());
-    const withProducts = req.query.withProducts !== '0';
-
-    const invoices = await Invoice.findAll({
-      where: {
-        date_time: { [Op.between]: [start, end] }
-      },
-      order: [['date_time', 'DESC']],
-      include: withProducts ? [
-        {
-          model: Productsale,
-          required: false
-        }
-      ] : [],
-    });
-
-    res.json({
-      success: true,
-      date: ymdRD(),
-      count: invoices.length,
-      data: invoices
-    });
-  } catch (error) {
-    console.error('GET /api/reports/today error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error interno del servidor',
-      details: process.env.NODE_ENV !== 'production' ? error.message : undefined
-    });
+    ProductSale = require('../models/ProductSales');  // plural
+  } catch (_e2) {
+    console.warn('[sales] Modelo ProductSale/ProductSales no disponible. Se omitirá el guardado de detalle.');
+    ProductSale = null;
   }
-});
+}
 
-/* =========================================================
- * RUTA NUEVA 2: Resumen del día (RD)
- * GET /api/reports/summary-today
- *   -> Totales general/contado/crédito del día
- *   -> Totales por vendedor
- *   -> Totales por producto (qty y amount)
- * ========================================================= */
-// RUTA NUEVA 2: Resumen del día (RD) — ventas a crédito = totales negativos
-router.get('/summary-today', async (req, res) => {
-    const t = await sequelize.transaction();
+let Payment = null;
+try {
+  Payment = require('../models/Payment');
+} catch {
+  console.warn('[sales] Modelo Payment no disponible (solo afecta /invoices/pay).');
+  Payment = null;
+}
+
+let Vendedor = null;
+try {
+  Vendedor = require('../models/Vendedor');
+} catch {
+  console.warn('[sales] Modelo Vendedor no disponible; el email usará solo vendedor_id.');
+  Vendedor = null;
+}
+
+// Product: UNA sola declaración. El campo de stock ES **qty** (y solo qty).
+let Product;
+try {
+  Product = require('../models/Product');
+} catch (e1) {
+  try {
+    Product = require('../models/Products');
+  } catch (e2) {
     try {
-      const { start, end } = rdDayBounds(new Date());
-  
-      // 1) Traer facturas del día (zona RD)
-      const invoices = await Invoice.findAll({
-        where: { date_time: { [Op.between]: [start, end] } },
-        raw: true,
-        transaction: t
-      });
-  
-      // 2) Totales con nueva regla:
-      //    - contado: total >= 0   (se suma tal cual)
-      //    - crédito: total < 0    (se suma como valor POSITIVO con Math.abs)
-      let total_general = 0;
-      let total_contado = 0;
-      let total_credito = 0;
-  
-      const bySeller = new Map(); // vendedor_id => { ... }
-  
-      invoices.forEach(inv => {
-        const total = Number(inv.total) || 0;
-        const vid = inv.vendedor_id || 0;
-  
-        total_general += total;
-  
-        if (!bySeller.has(vid)) {
-          bySeller.set(vid, {
-            vendedor_id: vid,
-            cantidad: 0,
-            total_general: 0,
-            total_contado: 0,
-            total_credito: 0
-          });
-        }
-        const agg = bySeller.get(vid);
-  
-        // sumas por vendedor
-        agg.cantidad += 1;
-        agg.total_general += total;
-  
-        if (total >= 0) {
-          total_contado += total;
-          agg.total_contado += total;
-        } else {
-          const creditoAbs = Math.abs(total);
-          total_credito += creditoAbs;
-          agg.total_credito += creditoAbs;
-        }
-      });
-  
-      // 3) Totales por producto (todas las facturas del día)
-      const productRows = await Productsale.findAll({
-        include: [
-          {
-            model: Invoice,
-            required: true,
-            where: { date_time: { [Op.between]: [start, end] } },
-            attributes: []
-          }
-        ],
-        attributes: [
-          'product_id',
-          'product_name',
-          [sequelize.fn('SUM', sequelize.col('qty')), 'qty_total'],
-          [sequelize.fn('SUM', sequelize.col('amount')), 'amount_total']
-        ],
-        group: ['product_id', 'product_name'],
-        raw: true,
-        transaction: t
-      });
-  
-      await t.commit();
-  
-      res.json({
-        success: true,
-        date: ymdRD(),
-        regla_credito: "Facturas con total < 0 se consideran crédito. Se reportan en positivo.",
-        resumen: {
-          total_general: Number(total_general.toFixed(2)),   // puede incluir negativos
-          total_contado: Number(total_contado.toFixed(2)),   // solo >= 0
-          total_credito: Number(total_credito.toFixed(2))    // suma de |total| cuando total<0
-        },
-        total_por_vendedor: Array.from(bySeller.values()).map(v => ({
-          vendedor_id: v.vendedor_id,
-          cantidad: v.cantidad,
-          total_general: Number(v.total_general.toFixed(2)),
-          total_contado: Number(v.total_contado.toFixed(2)),
-          total_credito: Number(v.total_credito.toFixed(2))
-        })),
-        total_por_producto: productRows.map(r => ({
-          product_id: r.product_id,
-          product_name: r.product_name,
-          qty_total: Number(r.qty_total),
-          amount_total: Number(parseFloat(r.amount_total || 0).toFixed(2))
-        }))
-      });
-    } catch (error) {
-      await t.rollback();
-      console.error('GET /api/reports/summary-today error:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Error interno del servidor',
-        details: process.env.NODE_ENV !== 'production' ? error.message : undefined
-      });
+      Product = require('../models/Producto');
+    } catch (e3) {
+      Product = null;
+      console.warn('[sales] Modelo Product no disponible; no se actualizará qty.');
     }
-  });
-  
+  }
+}
 
-/* =========================================================
- * RUTAS EXISTENTES
- * ========================================================= */
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+function absNum(n) {
+  const v = Number(n) || 0;
+  return Math.abs(v);
+}
+function safeDate(value, fallback = new Date()) {
+  const d = value ? new Date(value) : fallback;
+  return Number.isNaN(d.getTime()) ? fallback : d;
+}
 
-// ROUTE-1: Get products by invoice number
-// GET "/api/reports/fetchproductswithinvoicenumber/:invoice_number"
-router.get('/fetchproductswithinvoicenumber/:invoice_number', async (req, res) => {
+// Campo de stock (SIEMPRE qty)
+const QTY_FIELD = 'qty';
+
+// Umbral de alerta (stock bajo) — configurable por env; default 1000
+const LOW_STOCK_THRESHOLD = Number(process.env.LOW_STOCK_THRESHOLD || 1000);
+
+// ─────────────────────────────────────────────────────────────────────────────
+/** Email / SMTP (usar variables de entorno) — configuración TLS */
+const mailFrom = process.env.MAIL_FROM || process.env.SMTP_USER || 'ventas@example.com';
+const mailTo   = process.env.SALES_TO || process.env.MAIL_TO || 'ventas@example.com';
+
+const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com';
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_SECURE = SMTP_PORT === 465; // 465 => TLS directo; 587 => STARTTLS
+
+const transporter = nodemailer.createTransport({
+  host: SMTP_HOST,
+  port: SMTP_PORT,
+  secure: SMTP_SECURE,
+  auth: (process.env.SMTP_USER && process.env.SMTP_PASS)
+    ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+    : undefined,
+  requireTLS: !SMTP_SECURE,
+  tls: {
+    minVersion: 'TLSv1.2',
+    servername: SMTP_HOST,
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper para construir filas de productsales EXACTAMENTE con:
+// invoice_number, product_id, product_name, price, qty, discount, amount
+// ─────────────────────────────────────────────────────────────────────────────
+function buildProductSalesRows(invoiceNumber, rawItems) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) return [];
+  return rawItems.map((it) => {
+    const product_id   = it.product_id ?? it.productId ?? it.id ?? null;
+    const product_name = it.product_name ?? it.name ?? it.title ?? '';
+    const qty          = Number(it.qty ?? it.quantity ?? it.cantidad ?? 0) || 0;
+    const price        = Number(it.price ?? it.unit_price ?? it.precio ?? 0) || 0;
+    const discount     = Number(it.discount ?? it.descuento ?? 0) || 0;
+    const amount       = (it.amount != null)
+      ? Number(it.amount)
+      : Number((price * qty - discount).toFixed(2));
+
+    return {
+      invoice_number: invoiceNumber,
+      product_id,
+      product_name,
+      price,
+      qty,
+      discount,
+      amount
+    };
+  }).filter(r => r.product_id != null && r.qty > 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LISTAR TODAS
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/fetchallsales', async (_req, res) => {
   try {
-    const { invoice_number } = req.params;
-
-    const products = await Productsale.findAll({
-      where: { invoice_number }
-    });
-
-    res.json(products);
+    await sequelize.authenticate();
+    const invoices = await Invoice.findAll({ order: [['date_time', 'DESC']] });
+    res.json(invoices);
   } catch (error) {
-    console.error('Error fetching products:', error);
-    res.status(500).json({
-      error: 'Internal Server Error',
-      details: process.env.NODE_ENV !== 'production' ? error.message : null
-    });
+    console.error('❌ fetchallsales:', error);
+    res.status(500).json({ error: 'Internal Server Error', details: error.message });
   }
 });
 
-// ROUTE-2: Get sales report within date range
-// GET "/api/reports/salesreport?from=2024-08-01&to=2024-08-11"
-router.get('/salesreport', async (req, res) => {
+// ─────────────────────────────────────────────────────────────────────────────
+// FACTURAS POR VENDEDOR (usa vendedor_id)
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/invoices/seller/:vendedorId', async (req, res) => {
   try {
-    const { from, to } = req.query;
+    const { vendedorId } = req.params;
 
-    let whereCondition = {};
-
-    if (from && to) {
-      const startDate = new Date(from);
-      const endDate = new Date(to);
-
-      if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
-        return res.status(400).json({ error: "Invalid date format" });
-      }
-
-      whereCondition = {
-        date_time: {
-          [Op.between]: [
-            startDate,
-            new Date(endDate.getTime() + 24 * 60 * 60 * 1000 - 1)
+    const rows = await Invoice.findAll({
+      where: { vendedor_id: vendedorId },
+      attributes: {
+        include: [
+          [sequelize.literal('ABS(total)'), 'abs_total'],
+          [
+            sequelize.literal(
+              "CASE WHEN LOWER(COALESCE(payment_method,''))='credit' " +
+              "THEN GREATEST(ABS(total) - COALESCE(paid_amount,0), 0) " +
+              "ELSE 0 END"
+            ),
+            'balance'
           ]
-        }
-      };
-    } else if (from || to) {
-      return res.status(400).json({
-        error: "Both 'from' and 'to' parameters are required, or omit both to get all reports"
-      });
-    }
-
-    const reports = await Invoice.findAll({
-      attributes: [
-        'invoice_number',
-        'date_time',
-        'customer_name',
-        'customer_id',
-        'vendedor_id',
-        'total',
-        'cash',
-        'change'
-      ],
-      where: whereCondition,
+        ]
+      },
       order: [['date_time', 'DESC']],
       raw: true
     });
 
-    res.json(reports);
-  } catch (error) {
-    console.error('Error fetching sales report:', error);
-    res.status(500).json({
-      error: 'Internal Server Error',
-      details: process.env.NODE_ENV !== 'production' ? error.message : null
-    });
-  }
-});
-
-// ROUTE-3: Add new report - POST "/api/reports/addreport"
-router.post('/addreport', async (req, res) => {
-  const transaction = await sequelize.transaction();
-  try {
-    const {
-      invoice_number,
-      customer_name,
-      customer_id,
-      vendedor_id,
-      date_time,
-      products,
-      total,
-      cash,
-      change
-    } = req.body;
-
-    if (!Array.isArray(products) || products.length === 0) {
-      return res.status(400).json({ error: "Products should be a non-empty array" });
-    }
-
-    // Create invoice
-    const invoice = await Invoice.create({
-      invoice_number,
-      customer_name,
-      customer_id,
-      vendedor_id,
-      date_time,
-      total,
-      cash,
-      change
-    }, { transaction });
-
-    // Prepare product data
-    const productData = products.map(product => ({
-      invoice_number,
-      product_name: product.product_name,
-      product_id: product.product_id,
-      amount: product.t_price,
-      qty: product.qty,
-      price: product.s_price
+    const normalized = rows.map(r => ({
+      ...r,
+      total: Number(r.abs_total ?? r.total ?? 0),
+      balance: Number(r.balance ?? 0),
     }));
 
-    // Bulk create products
-    const productsale = await Productsale.bulkCreate(productData, { transaction });
-
-    await transaction.commit();
-
-    res.json({ success: true, invoice, productsale });
+    res.json({ success: true, data: normalized });
   } catch (error) {
-    await transaction.rollback();
-
-    console.error('Error adding report:', error);
-    res.status(500).json({
-      error: 'Internal Server Error',
-      details: process.env.NODE_ENV !== 'production' ? error.message : null
-    });
+    console.error('❌ invoices/seller:', error);
+    res.status(500).json({ success: false, error: 'Error al listar facturas del vendedor', details: error.message });
   }
 });
 
-// =============================
-// RUTA: /api/reports/sales
-// Query:
-//   ?start=YYYY-MM-DD
-//   ?end=YYYY-MM-DD
-//   ?vendedor_id=123   (opcional)
-// Si no mandas start/end, usa el día de hoy en horario RD.
-// =============================
-router.get('/sales', async (req, res) => {
+// ─────────────────────────────────────────────────────────────────────────────
+// CREAR FACTURA + actualizar qty + email
+// Body:
+// {
+//   invoice_number, date_time, customer_name, total, cash, change,
+//   vendedor_id, payment_method ('cash'|'credit'),
+//   customer_id?, zona?,
+//   items|products|cartItems: [
+//     { product_id|id|productId, product_name|name|title, quantity|qty|cantidad, price|unit_price|precio, discount?, amount? }
+//   ]
+// }
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/addsale', async (req, res) => {
+  const t = await sequelize.transaction();
   try {
-    const { start, end, vendedor_id } = req.query;
-
-    // --- helpers de rango en RD (incluyente) ---
-    function rdRangeFromParams(startStr, endStr) {
-      const now = new Date();
-      const tzNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/Santo_Domingo' }));
-      const y = tzNow.getFullYear();
-      const m = String(tzNow.getMonth() + 1).padStart(2, '0');
-      const d = String(tzNow.getDate()).padStart(2, '0');
-      const todayYMD = `${y}-${m}-${d}`;
-
-      const s = (startStr || todayYMD);
-      const e = (endStr   || s);
-
-      // Límites RD (UTC-04:00) inclusivos
-      const startDate = new Date(`${s}T00:00:00-04:00`);
-      const endDate   = new Date(`${e}T23:59:59.999-04:00`);
-      return { startDate, endDate, startYMD: s, endYMD: e };
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      await t.rollback();
+      return res.status(400).json({ errors: errors.array() });
     }
 
-    const { startDate, endDate, startYMD, endYMD } = rdRangeFromParams(start, end);
+    const {
+      invoice_number,
+      date_time,         // ISO string
+      customer_id,
+      customer_name,
+      total,
+      cash,
+      change,
+      vendedor_id,
+      payment_method,    // 'cash' | 'credit'
+      zona               // opcional
+    } = req.body;
 
-    // Filtro base para facturas
-    const whereBase = {
-      date_time: { [Op.between]: [startDate, endDate] }
+    if (
+      invoice_number == null || !date_time || !customer_name ||
+      total == null || cash == null || change == null
+    ) {
+      await t.rollback();
+      return res.status(400).json({ error: 'Faltan campos requeridos' });
+    }
+
+    const method = String(payment_method || 'cash').toLowerCase();
+    const dt = safeDate(date_time);
+    const absTotal = absNum(total);
+
+    // contado => pagado completo
+    const paidAmount = method === 'cash' ? absTotal : 0;
+    const paidAt     = method === 'cash' ? dt : null;
+
+    const updatesIfHave = {};
+    if (Invoice.rawAttributes?.balance) {
+      updatesIfHave.balance = method === 'credit' ? Math.max(absTotal - paidAmount, 0) : 0;
+    }
+
+    // 1) Crear factura
+    const invoice = await Invoice.create({
+      invoice_number,
+      date_time: dt,
+      customer_id: customer_id ?? null,
+      customer_name,
+      total,
+      cash,
+      change,
+      vendedor_id: vendedor_id ?? null,
+      payment_method: method,
+      paid_amount: paidAmount,
+      paid_at: paidAt,
+      zona: zona ?? null,
+      ...updatesIfHave
+    }, { transaction: t });
+
+    // 2) Obtener items de la venta (admite varias claves)
+    const rawItems = Array.isArray(req.body.items)
+      ? req.body.items
+      : Array.isArray(req.body.products)
+        ? req.body.products
+        : Array.isArray(req.body.cartItems)
+          ? req.body.cartItems
+          : [];
+
+    // Guardaremos info para el correo y actualización de inventario
+    const itemsWithQty = [];
+
+    // 3) Guardar detalle en productsales (si existe el modelo)
+    if (ProductSale && rawItems.length > 0) {
+      try {
+        const rows = buildProductSalesRows(invoice_number, rawItems);
+        if (rows.length > 0) {
+          await ProductSale.bulkCreate(rows, { transaction: t });
+        }
+      } catch (e) {
+        console.warn('[addsale] No se pudo guardar productsales:', e?.message);
+      }
+    }
+
+    // 4) Descontar **qty** del inventario (SOLO `qty`)
+    if (!Product) {
+      console.warn('[sales/addsale] No hay modelo Product; se omite actualización de qty.');
+    } else if (!Product.rawAttributes?.qty) {
+      console.warn("[sales/addsale] El modelo Product no tiene el campo 'qty'. Revisa el modelo/DB.");
+    } else {
+      for (const it of rawItems) {
+        const product_id   = it.product_id ?? it.productId ?? it.id ?? null;
+        const product_name = it.product_name ?? it.name ?? it.title ?? `ID ${product_id}`;
+        const quantity     = Math.max(0, Number(it.quantity ?? it.qty ?? it.cantidad ?? 0) || 0);
+        const unit_price   = Number(it.price ?? it.unit_price ?? it.precio ?? 0);
+        const discount     = Number(it.discount ?? 0) || 0;
+        const subtotal     = (it.amount != null)
+          ? Number(it.amount)
+          : Number((unit_price * quantity - discount).toFixed(2));
+
+        let qtyBefore = null;
+        let qtyAfter  = null;
+
+        if (product_id == null) {
+          console.warn('[sales/addsale] Ítem sin product_id/id/productId; no se puede actualizar qty.', it);
+        } else if (quantity <= 0) {
+          console.warn(`[sales/addsale] Cantidad <= 0 para producto ${product_id}; no se descuenta qty.`);
+        } else {
+          // Leer qty actual (solo para mostrar en correo/log)
+          const beforeRow = await Product.findByPk(product_id, {
+            attributes: ['id', 'product_name', 'qty'],
+            transaction: t
+          });
+
+          if (!beforeRow) {
+            console.warn(`[sales/addsale] Producto id=${product_id} no encontrado; no se actualiza qty.`);
+          } else {
+            qtyBefore = Number(beforeRow.get('qty')) || 0;
+
+            // UPDATE portable: qty = CASE WHEN qty >= :by THEN qty - :by ELSE 0 END
+            const [affected] = await Product.update(
+              { qty: sequelize.literal(`CASE WHEN qty >= ${quantity} THEN qty - ${quantity} ELSE 0 END`) },
+              { where: { id: product_id }, transaction: t }
+            );
+
+            if (affected === 0) {
+              console.warn(`[sales/addsale] UPDATE no afectó filas (id=${product_id}). Verifica que exista y no esté soft-deleted.`);
+            }
+
+            const afterRow = await Product.findByPk(product_id, {
+              attributes: ['id', 'product_name', 'qty'],
+              transaction: t
+            });
+            qtyAfter = afterRow ? (Number(afterRow.get('qty')) || 0) : null;
+
+            console.log(`[sales/addsale] Producto ${product_id} — qty: ${qtyBefore} -> ${qtyAfter} (venta: ${quantity})`);
+          }
+        }
+
+        itemsWithQty.push({
+          product_id,
+          product_name,
+          quantity,
+          unit_price,
+          subtotal,
+          qty_before: qtyBefore,
+          qty_after: qtyAfter
+        });
+      }
+    }
+
+    // 5) Commit
+    await t.commit();
+
+    // 6) Correo (no afecta la venta si falla)
+    (async () => {
+      try {
+        let vendedorNombre = vendedor_id ? `ID ${vendedor_id}` : 'Sin vendedor';
+        let vendedorZona   = zona || null;
+        if (Vendedor && vendedor_id) {
+          const v = await Vendedor.findByPk(vendedor_id);
+          if (v) {
+            vendedorNombre = v.nombre || vendedorNombre;
+            vendedorZona   = v.zona || vendedorZona;
+          }
+        }
+
+        if (!transporter) return;
+
+        const tipo       = method === 'credit' ? 'CRÉDITO' : 'CONTADO';
+        const tipoAsunto = method === 'credit' ? 'crédito' : 'contado';
+        const fechaVenta = dt.toLocaleString('es-DO');
+
+        const formatoRD = new Intl.NumberFormat('es-DO', {
+          style: 'currency',
+          currency: 'DOP',
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        });
+        const montoAsunto = formatoRD.format(absTotal);
+        const asunto = `El vendedor ${vendedorNombre} ha realizado una venta ${tipoAsunto} al cliente ${customer_name} por un monto de ${montoAsunto}`;
+
+        const rowsHtml = (itemsWithQty || []).map(it => {
+          const price = formatoRD.format(Number(it.unit_price || 0));
+          const sub   = formatoRD.format(Number(it.subtotal || 0));
+          const before = (it.qty_before == null) ? '—' : it.qty_before.toLocaleString('es-DO');
+          const after  = (it.qty_after  == null) ? '—' : it.qty_after.toLocaleString('es-DO');
+
+          return `
+            <tr>
+              <td>${it.product_name}</td>
+              <td style="text-align:right;">${Number(it.quantity || 0).toLocaleString('es-DO')}</td>
+              <td style="text-align:right;">${price}</td>
+              <td style="text-align:right;">${sub}</td>
+              <td style="text-align:right;">${before}</td>
+              <td style="text-align:right;"><b>${after}</b></td>
+            </tr>
+          `;
+        }).join('');
+
+        const html = `
+          <div style="font-family:Arial,Helvetica,sans-serif; color:#222;">
+            <h3 style="margin:0 0 6px;">Nueva venta registrada</h3>
+            <ul style="margin:0 0 12px 18px; padding:0; line-height:1.4;">
+              <li><b>Factura:</b> ${invoice_number}</li>
+              <li><b>Fecha:</b> ${fechaVenta}</li>
+              <li><b>Cliente:</b> ${customer_name}</li>
+              <li><b>Monto:</b> ${montoAsunto}</li>
+              <li><b>Método:</b> ${tipo}</li>
+              <li><b>Vendedor:</b> ${vendedorNombre}</li>
+              <li><b>Zona:</b> ${vendedorZona ?? '—'}</li>
+            </ul>
+            <h4 style="margin:16px 0 8px;">Detalle de productos</h4>
+            <table cellpadding="6" cellspacing="0" style="width:100%; border-collapse:collapse; font-size:13px;">
+              <thead>
+                <tr style="background:#f5f5f5;">
+                  <th style="text-align:left;">Producto</th>
+                  <th style="text-align:right;">Cant.</th>
+                  <th style="text-align:right;">Precio</th>
+                  <th style="text-align:right;">Subtotal</th>
+                  <th style="text-align:right;">Qty antes</th>
+                  <th style="text-align:right;">Qty después</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rowsHtml || `<tr><td colspan="6" style="text-align:center;color:#777;">(Sin detalle)</td></tr>`}
+              </tbody>
+            </table>
+          </div>
+        `;
+
+        await transporter.sendMail({
+          from: mailFrom,
+          to: mailTo,
+          subject: asunto,
+          html
+        });
+      } catch (e) {
+        console.warn('[sales/addsale] No se pudo enviar correo:', e?.message);
+      }
+    })();
+
+    res.status(201).json({ success: true, invoice });
+  } catch (error) {
+    if (t.finished !== 'commit') await t.rollback();
+    if (error.name === 'SequelizeUniqueConstraintError') {
+      return res.status(400).json({ error: 'Número de factura duplicado' });
+    }
+    console.error('❌ addsale:', error);
+    res.status(500).json({ error: 'Error al crear factura', details: error.message });
+  }
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OBTENER POR invoice_number
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/getsale/:invoice_number', async (req, res) => {
+  try {
+    const invoice = await Invoice.findByPk(req.params.invoice_number);
+    if (!invoice) return res.status(404).json({ error: 'Factura no encontrada' });
+    res.json(invoice);
+  } catch (error) {
+    console.error('❌ getsale:', error);
+    res.status(500).json({ error: 'Error al obtener factura', details: error.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+/** ACTUALIZAR POR invoice_number
+ *  - si envías payment_method/paid_amount/paid_at también se actualizan
+ *  - si envías items/products/cartItems se REEMPLAZA el detalle en productsales
+ */
+router.put('/updatesale/:invoice_number', async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    const invoice = await Invoice.findByPk(req.params.invoice_number);
+    if (!invoice) {
+      await t.rollback();
+      return res.status(404).json({ error: 'Factura no encontrada' });
+    }
+
+    const {
+      date_time, customer_name, total, cash, change,
+      vendedor_id, payment_method, paid_amount, paid_at
+    } = req.body;
+
+    if (
+      date_time == null || customer_name == null ||
+      total == null || cash == null || change == null
+    ) {
+      await t.rollback();
+      return res.status(400).json({ error: 'Faltan campos requeridos' });
+    }
+
+    const updates = {
+      date_time: safeDate(date_time),
+      customer_name,
+      total,
+      cash,
+      change,
+      vendedor_id: vendedor_id ?? invoice.vendedor_id,
+      payment_method: payment_method ?? invoice.payment_method,
+      paid_amount: paid_amount ?? invoice.paid_amount
     };
-    if (vendedor_id) whereBase.vendedor_id = Number(vendedor_id);
 
-    // ---------- VENTAS ----------
-    // Totales por vendedor
-    const byVendorRows = await Invoice.findAll({
-      attributes: [
-        'vendedor_id',
-        [fn('COUNT', literal('*')), 'cantidad'],
-        [fn('SUM', col('total')), 'total_general'],
-        [fn('SUM', literal(`CASE WHEN payment_method = 'credit' THEN 0 ELSE total END`)), 'total_contado'],
-        [fn('SUM', literal(`CASE WHEN payment_method = 'credit' THEN total ELSE 0 END`)), 'total_credito'],
-      ],
-      where: whereBase,
-      group: ['vendedor_id'],
+    if (paid_at !== undefined) updates.paid_at = paid_at ? safeDate(paid_at) : null;
+
+    if (Invoice.rawAttributes?.balance) {
+      const method = String(updates.payment_method || '').toLowerCase();
+      const absTotal = absNum(updates.total);
+      const paid = Number(updates.paid_amount || 0);
+      updates.balance = method === 'credit' ? Math.max(absTotal - paid, 0) : 0;
+    }
+
+    await invoice.update(updates, { transaction: t });
+
+    // Reemplazar detalle si llegan items/products/cartItems
+    try {
+      const rawItems = Array.isArray(req.body.items)
+        ? req.body.items
+        : Array.isArray(req.body.products)
+          ? req.body.products
+          : Array.isArray(req.body.cartItems)
+            ? req.body.cartItems
+            : [];
+
+      if (ProductSale && rawItems.length > 0) {
+        // borrar detalle anterior
+        await ProductSale.destroy({
+          where: { invoice_number: invoice.invoice_number },
+          transaction: t
+        });
+
+        // insertar detalle nuevo
+        const rows = buildProductSalesRows(invoice.invoice_number, rawItems);
+        if (rows.length > 0) {
+          await ProductSale.bulkCreate(rows, { transaction: t });
+        }
+      }
+    } catch (e) {
+      console.warn('[updatesale] No se pudo reemplazar productsales:', e?.message);
+    }
+
+    await t.commit();
+    res.json(invoice);
+  } catch (error) {
+    if (t.finished !== 'commit') await t.rollback();
+    console.error('❌ updatesale:', error);
+    res.status(500).json({ error: 'Error al actualizar factura', details: error.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ELIMINAR POR invoice_number (borra también el detalle productsales)
+// ─────────────────────────────────────────────────────────────────────────────
+router.delete('/deletesale/:invoice_number', async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    const invoice = await Invoice.findByPk(req.params.invoice_number);
+    if (!invoice) {
+      await t.rollback();
+      return res.status(404).json({ error: 'Factura no encontrada' });
+    }
+
+    // Borrar detalle asociado
+    if (ProductSale) {
+      try {
+        await ProductSale.destroy({
+          where: { invoice_number: req.params.invoice_number },
+          transaction: t
+        });
+      } catch (e) {
+        console.warn('[deletesale] No se pudo borrar productsales:', e?.message);
+      }
+    }
+
+    await Invoice.destroy({ where: { invoice_number: req.params.invoice_number }, transaction: t });
+    await t.commit();
+    res.json({ success: true, message: 'Factura eliminada correctamente' });
+  } catch (error) {
+    if (t.finished !== 'commit') await t.rollback();
+    console.error('❌ deletesale:', error);
+    res.status(500).json({ error: 'Error al eliminar factura', details: error.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REGISTRAR PAGO (ABONO) A CRÉDITO
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/invoices/pay/:invoice_number', async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    const { invoice_number } = req.params;
+    const { amount, at } = req.body;
+
+    const amt = Number(amount);
+    if (!amt || amt <= 0) {
+      await t.rollback();
+      return res.status(400).json({ error: 'Monto inválido' });
+    }
+
+    const payAt = safeDate(at, new Date());
+
+    const invoice = await Invoice.findByPk(invoice_number, {
+      transaction: t,
+      lock: t.LOCK.UPDATE
+    });
+    if (!invoice) {
+      await t.rollback();
+      return res.status(404).json({ error: 'Factura no encontrada' });
+    }
+
+    const method = String(invoice.payment_method || '').toLowerCase();
+    if (method !== 'credit') {
+      await t.rollback();
+      return res.status(400).json({ error: 'La factura no es a crédito' });
+    }
+
+    const rawTotal = Number(invoice.total) || 0;
+    const absTotal = Math.abs(rawTotal);
+    const alreadyPaid = Number(invoice.paid_amount || 0);
+    const currentBalance = Math.max(absTotal - alreadyPaid, 0);
+
+    if (currentBalance <= 0) {
+      await t.rollback();
+      return res.status(400).json({ error: 'La factura ya está saldada' });
+    }
+    if (amt > currentBalance) {
+      await t.rollback();
+      return res.status(400).json({ error: 'El abono excede el balance' });
+    }
+
+    // Registrar en Payments (si existe)
+    try {
+      if (Payment) {
+        const payload = { amount: amt };
+        if (Payment.rawAttributes?.created_at) payload.created_at = payAt;
+        if (Payment.rawAttributes?.paid_at)     payload.paid_at     = payAt;
+        if (Payment.rawAttributes?.invoice_id)  payload.invoice_id  = invoice.invoice_number;
+        if (Payment.rawAttributes?.invoice_number) payload.invoice_number = invoice.invoice_number;
+        if (Payment.rawAttributes?.vendedor_id) payload.vendedor_id = invoice.vendedor_id ?? null;
+        if (Payment.rawAttributes?.seller_id)   payload.seller_id   = invoice.vendedor_id ?? null;
+
+        await Payment.create(payload, { transaction: t });
+      }
+    } catch (e) {
+      console.warn('[sales/invoices/pay] No se pudo registrar Payment:', e?.message);
+    }
+
+    const newPaid = alreadyPaid + amt;
+    const newBalance = Math.max(absTotal - newPaid, 0);
+
+    const updates = { paid_amount: newPaid };
+    if (Invoice.rawAttributes?.balance) updates.balance = newBalance;
+    if (newBalance === 0) {
+      updates.paid_at = payAt;
+      if (method === 'credit') updates.total = absTotal; // poner en positivo (consistencia UI)
+    }
+
+    await invoice.update(updates, { transaction: t });
+    await t.commit();
+
+    return res.json({
+      success: true,
+      invoice: {
+        invoice_number: invoice.invoice_number,
+        customer_name: invoice.customer_name,
+        payment_method: invoice.payment_method,
+        total: (newBalance === 0 && method === 'credit') ? absTotal : Math.abs(Number(invoice.total) || 0),
+        paid_amount: newPaid,
+        balance: newBalance,
+        total_restante: newBalance,
+        last_payment_at: payAt.toISOString(),
+        paid_at: newBalance === 0 ? payAt.toISOString() : (invoice.paid_at || null),
+        date_time: invoice.date_time,
+        vendedor_id: invoice.vendedor_id ?? null
+      }
+    });
+  } catch (error) {
+    if (t.finished !== 'commit') await t.rollback();
+    console.error('❌ invoices/pay:', error);
+    res.status(500).json({ success: false, error: 'Error al registrar el pago', details: error.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ESTADÍSTICAS POR VENDEDOR
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/vendedor-stats', async (req, res) => {
+  try {
+    const { startDate, endDate } = req.body;
+    let where = '';
+    const params = [];
+    if (startDate && endDate) {
+      where = 'WHERE date_time BETWEEN ? AND ?';
+      params.push(startDate, endDate + ' 23:59:59');
+    } else if (startDate) {
+      where = 'WHERE date_time >= ?';
+      params.push(startDate);
+    } else if (endDate) {
+      where = 'WHERE date_time <= ?';
+      params.push(endDate + ' 23:59:59');
+    }
+
+    const q = `
+      SELECT COALESCE(vendedor_id, 0) AS vendedor_id,
+             COUNT(invoice_number) AS cantidad_ventas,
+             SUM(total) AS total_ventas
+      FROM invoices
+      ${where}
+      GROUP BY COALESCE(vendedor_id, 0)
+      ORDER BY total_ventas DESC
+    `;
+    const data = await sequelize.query(q, { replacements: params, type: QueryTypes.SELECT });
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('❌ vendedor-stats:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener estadísticas de ventas', details: error.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VENTAS DE UN DÍA ESPECÍFICO
+// GET /sales/by-day?date=YYYY-MM-DD[&vendedor_id=##]
+// GET /sales/day/:date
+// ─────────────────────────────────────────────────────────────────────────────
+router.get(['/by-day', '/day/:date'], async (req, res) => {
+  try {
+    // 1) Tomamos la fecha desde query o params
+    const dateStr = (req.query.date || req.params.date || '').trim();
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      return res.status(400).json({
+        success: false,
+        error: "Parámetro 'date' inválido. Formato esperado: YYYY-MM-DD"
+      });
+    }
+
+    // 2) Construimos rango [inicio, fin] del día
+    const start = new Date(`${dateStr}T00:00:00.000`);
+    const end   = new Date(`${dateStr}T23:59:59.999`);
+
+    // 3) Filtro opcional por vendedor
+    const vendedorId = req.query.vendedor_id != null ? String(req.query.vendedor_id).trim() : null;
+
+    // 4) Agregados rápidos (SQL crudo para portabilidad y performance)
+    const paramsAgg = [start, end];
+    let whereAgg = 'WHERE date_time BETWEEN ? AND ?';
+    if (vendedorId) {
+      whereAgg += ' AND COALESCE(vendedor_id, 0) = ?';
+      paramsAgg.push(vendedorId);
+    }
+
+    const aggSql = `
+      SELECT
+        COUNT(*)                                                AS cantidad_facturas,
+        SUM(ABS(COALESCE(total,0)))                             AS total_ventas,
+        SUM(CASE WHEN LOWER(COALESCE(payment_method,''))='cash'
+                 THEN ABS(COALESCE(total,0)) ELSE 0 END)        AS total_contado,
+        SUM(CASE WHEN LOWER(COALESCE(payment_method,''))='credit'
+                 THEN ABS(COALESCE(total,0)) ELSE 0 END)        AS total_credito,
+        SUM(COALESCE(paid_amount,0))                            AS total_pagado,
+        SUM(CASE WHEN LOWER(COALESCE(payment_method,''))='credit'
+                 THEN GREATEST(ABS(COALESCE(total,0)) - COALESCE(paid_amount,0), 0)
+                 ELSE 0 END)                                    AS balance_pendiente
+      FROM invoices
+      ${whereAgg}
+    `;
+
+    const [agg] = await sequelize.query(aggSql, {
+      replacements: paramsAgg,
+      type: QueryTypes.SELECT
+    });
+
+    // 5) Listado de facturas del día (normalizado: total en positivo)
+    const whereList = {
+      date_time: { [Op.between]: [start, end] }
+    };
+    if (vendedorId) whereList.vendedor_id = vendedorId;
+
+    const rows = await Invoice.findAll({
+      where: whereList,
+      order: [['date_time', 'DESC']],
+      attributes: {
+        include: [
+          [sequelize.literal('ABS(COALESCE(total,0))'), 'abs_total'],
+          [
+            sequelize.literal(
+              "CASE WHEN LOWER(COALESCE(payment_method,''))='credit' " +
+              "THEN GREATEST(ABS(COALESCE(total,0)) - COALESCE(paid_amount,0), 0) " +
+              "ELSE 0 END"
+            ),
+            'balance'
+          ]
+        ]
+      },
       raw: true
     });
 
-    // Totales globales
-    const totalsRow = await Invoice.findOne({
-      attributes: [
-        [fn('COUNT', literal('*')), 'countSales'],
-        [fn('SUM', col('total')), 'grandTotal'],
-        [fn('SUM', literal(`CASE WHEN payment_method = 'credit' THEN 0 ELSE total END`)), 'total_contado'],
-        [fn('SUM', literal(`CASE WHEN payment_method = 'credit' THEN total ELSE 0 END`)), 'total_credito'],
-      ],
-      where: whereBase,
+    const facturas = rows.map(r => ({
+      ...r,
+      total: Number(r.abs_total ?? r.total ?? 0),
+      balance: Number(r.balance ?? 0)
+    }));
+
+    // 6) (Opcional) Desglose por vendedor para ese día
+    const paramsVend = [start, end];
+    let whereVend = 'WHERE date_time BETWEEN ? AND ?';
+    if (vendedorId) {
+      whereVend += ' AND COALESCE(vendedor_id, 0) = ?';
+      paramsVend.push(vendedorId);
+    }
+    const bySellerSql = `
+      SELECT
+        COALESCE(vendedor_id, 0)                                AS vendedor_id,
+        COUNT(invoice_number)                                   AS cantidad_ventas,
+        SUM(ABS(COALESCE(total,0)))                             AS total_ventas,
+        SUM(CASE WHEN LOWER(COALESCE(payment_method,''))='cash'
+                 THEN ABS(COALESCE(total,0)) ELSE 0 END)        AS total_contado,
+        SUM(CASE WHEN LOWER(COALESCE(payment_method,''))='credit'
+                 THEN ABS(COALESCE(total,0)) ELSE 0 END)        AS total_credito,
+        SUM(COALESCE(paid_amount,0))                            AS total_pagado,
+        SUM(CASE WHEN LOWER(COALESCE(payment_method,''))='credit'
+                 THEN GREATEST(ABS(COALESCE(total,0)) - COALESCE(paid_amount,0), 0)
+                 ELSE 0 END)                                    AS balance_pendiente
+      FROM invoices
+      ${whereVend}
+      GROUP BY COALESCE(vendedor_id, 0)
+      ORDER BY total_ventas DESC
+    `;
+    const breakdown = await sequelize.query(bySellerSql, {
+      replacements: paramsVend,
+      type: QueryTypes.SELECT
+    });
+
+    return res.json({
+      success: true,
+      date: dateStr,
+      filter: { vendedor_id: vendedorId ?? null },
+      summary: {
+        cantidad_facturas: Number(agg?.cantidad_facturas || 0),
+        total_ventas: Number(agg?.total_ventas || 0),
+        total_contado: Number(agg?.total_contado || 0),
+        total_credito: Number(agg?.total_credito || 0),
+        total_pagado: Number(agg?.total_pagado || 0),
+        balance_pendiente: Number(agg?.balance_pendiente || 0)
+      },
+      by_seller: breakdown,
+      invoices: facturas
+    });
+  } catch (error) {
+    console.error('❌ sales/by-day:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener ventas del día', details: error.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ÚLTIMOS N PEDIDOS (por defecto 5)
+// GET /invoices/latest            → últimos 5
+// GET /invoices/latest?limit=10   → últimos 10 (tope 50)
+// Devuelve: cliente, vendedor, método, total(+), pagado, balance, estado_credito
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/invoices/latest', async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(Number(req.query.limit) || 5, 50));
+
+    // Traemos las últimas facturas
+    const rows = await Invoice.findAll({
+      order: [['date_time', 'DESC']],
+      limit,
+      attributes: {
+        include: [
+          // total siempre positivo para UI
+          [sequelize.literal('ABS(COALESCE(total,0))'), 'abs_total']
+        ]
+      },
       raw: true
     });
 
-    // ---------- EGRESOS ----------
-    const replacementsBaseDates = {
-      s: startYMD,       // vendor_expenses.fecha es DATE
-      e: endYMD,
-      vid: vendedor_id ? Number(vendedor_id) : null
-    };
+    // Map de vendedores (si existe el modelo)
+    let vendedorById = {};
+    try {
+      if (Vendedor) {
+        const ids = [...new Set(rows.map(r => r.vendedor_id).filter(v => v != null))];
+        if (ids.length > 0) {
+          // Asumimos PK = id y columna nombre = 'nombre'
+          const vendedores = await Vendedor.findAll({
+            where: { id: ids },
+            attributes: ['id', 'nombre'],
+            raw: true
+          });
+          vendedorById = Object.fromEntries(vendedores.map(v => [v.id, v.nombre]));
+        }
+      }
+    } catch (e) {
+      console.warn('[invoices/latest] No se pudo cargar Vendedor:', e?.message);
+    }
 
-    // Total de egresos del rango
-    const expensesTotalRows = await sequelize.query(
-      `
-      SELECT COALESCE(SUM(monto),0) AS total_expenses
-      FROM vendor_expenses
-      WHERE fecha BETWEEN :s AND :e
-      ${vendedor_id ? ' AND vendedor_id = :vid' : ''}
-      `,
-      { replacements: replacementsBaseDates, type: QueryTypes.SELECT }
-    );
-    const expenses_total = Number((expensesTotalRows[0]?.total_expenses || 0));
+    const data = rows.map(r => {
+      const method = String(r.payment_method || 'cash').toLowerCase();
+      const total = Number(r.abs_total ?? r.total ?? 0);
+      const paid  = Number(r.paid_amount || 0);
+      const balance = method === 'credit' ? Math.max(total - paid, 0) : 0;
 
-    // Egresos por vendedor
-    const expensesByVendor = await sequelize.query(
-      `
-      SELECT vendedor_id, COALESCE(SUM(monto),0) AS total_expenses
-      FROM vendor_expenses
-      WHERE fecha BETWEEN :s AND :e
-      ${vendedor_id ? ' AND vendedor_id = :vid' : ''}
-      GROUP BY vendedor_id
-      `,
-      { replacements: replacementsBaseDates, type: QueryTypes.SELECT }
-    );
+      let estado_credito = 'contado';
+      if (method === 'credit') {
+        estado_credito = balance <= 0 ? 'crédito pagado' : 'crédito pendiente';
+      }
 
-    // Egresos por día
-    const expensesByDay = await sequelize.query(
-      `
-      SELECT fecha AS date, COALESCE(SUM(monto),0) AS total
-      FROM vendor_expenses
-      WHERE fecha BETWEEN :s AND :e
-      ${vendedor_id ? ' AND vendedor_id = :vid' : ''}
-      GROUP BY fecha
-      ORDER BY fecha ASC
-      `,
-      { replacements: replacementsBaseDates, type: QueryTypes.SELECT }
-    );
-
-    // ---------- COGS (costo de compra de lo vendido) ----------
-    // OJO: ajusta nombres de tablas si difieren:
-    // - productsales  -> tabla de items vendidos (Productsale)
-    // - products      -> tabla de productos (con o_price)
-    const replacementsCogs = {
-      start: startDate,
-      end: endDate,
-      vid: vendedor_id ? Number(vendedor_id) : null
-    };
-
-    // COGS total
-    const cogsTotalRows = await sequelize.query(
-      `
-      SELECT COALESCE(SUM(ps.qty * COALESCE(p.o_price,0)),0) AS cogs_total
-      FROM productsales ps
-      JOIN invoices i   ON i.invoice_number = ps.invoice_number
-      LEFT JOIN products p ON p.id = ps.product_id
-      WHERE i.date_time BETWEEN :start AND :end
-      ${vendedor_id ? ' AND i.vendedor_id = :vid' : ''}
-      `,
-      { replacements: replacementsCogs, type: QueryTypes.SELECT }
-    );
-    const cogs_total = Number((cogsTotalRows[0]?.cogs_total || 0));
-
-    // COGS por vendedor
-    const cogsByVendorRows = await sequelize.query(
-      `
-      SELECT i.vendedor_id, COALESCE(SUM(ps.qty * COALESCE(p.o_price,0)),0) AS cogs
-      FROM productsales ps
-      JOIN invoices i   ON i.invoice_number = ps.invoice_number
-      LEFT JOIN products p ON p.id = ps.product_id
-      WHERE i.date_time BETWEEN :start AND :end
-      ${vendedor_id ? ' AND i.vendedor_id = :vid' : ''}
-      GROUP BY i.vendedor_id
-      `,
-      { replacements: replacementsCogs, type: QueryTypes.SELECT }
-    );
-
-    // ---------- Ensamblado de respuesta ----------
-    const safeNumber = (v) => Number(v || 0);
-
-    // Índices auxiliares para egresos/COGS por vendedor
-    const expByVendorMap = new Map();
-    expensesByVendor.forEach(r => expByVendorMap.set(String(r.vendedor_id ?? 'null'), Number(r.total_expenses || 0)));
-
-    const cogsByVendorMap = new Map();
-    cogsByVendorRows.forEach(r => cogsByVendorMap.set(String(r.vendedor_id ?? 'null'), Number(r.cogs || 0)));
-
-    // byVendor enriquecido
-    const byVendor = byVendorRows.map(r => {
-      const key = String(r.vendedor_id ?? 'null');
-      const vExpenses = expByVendorMap.get(key) || 0;
-      const vCogs     = cogsByVendorMap.get(key) || 0;
-      const totalGen  = safeNumber(r.total_general);
       return {
+        invoice_number: r.invoice_number,
+        date_time: r.date_time,
+        customer_name: r.customer_name,                       // nombre del cliente
         vendedor_id: r.vendedor_id ?? null,
-        cantidad: safeNumber(r.cantidad),
-        total_general: Number(totalGen.toFixed(2)),
-        total_contado: Number(safeNumber(r.total_contado).toFixed(2)),
-        total_credito: Number(safeNumber(r.total_credito).toFixed(2)),
-        expenses: Number(vExpenses.toFixed(2)),
-        net_after_expenses: Number((totalGen - vExpenses).toFixed(2)),
-        cogs: Number(vCogs.toFixed(2)),
-        profit: Number((totalGen - vCogs).toFixed(2)), // ganancia = ventas - costo compra
+        vendedor_nombre: vendedorById[r.vendedor_id]          // nombre del vendedor (si existe)
+          ?? (r.vendedor_id ? `ID ${r.vendedor_id}` : null),
+        payment_method: method,
+        total,
+        paid_amount: paid,
+        balance,                                              // monto pendiente (si crédito)
+        estado_credito                                       // contado | crédito pagado | crédito pendiente
       };
     });
 
-    const totals = {
-      countSales: safeNumber(totalsRow?.countSales),
-      grandTotal: Number(safeNumber(totalsRow?.grandTotal).toFixed(2)),
-      total_contado: Number(safeNumber(totalsRow?.total_contado).toFixed(2)),
-      total_credito: Number(safeNumber(totalsRow?.total_credito).toFixed(2)),
-      expenses_total: Number(expenses_total.toFixed(2)),
-      net_after_expenses: Number((safeNumber(totalsRow?.grandTotal) - expenses_total).toFixed(2)),
-      cogs_total: Number(cogs_total.toFixed(2)),
-      profit: Number((safeNumber(totalsRow?.grandTotal) - cogs_total).toFixed(2)),
-    };
-
-    res.json({
-      success: true,
-      range: { start: startYMD, end: endYMD },
-      byVendor,
-      totals,
-      expenses: {
-        byDay: expensesByDay.map(r => ({
-          date: r.date,                       // YYYY-MM-DD
-          total: Number(Number(r.total || 0).toFixed(2)),
-        })),
-        byVendor: expensesByVendor.map(r => ({
-          vendedor_id: r.vendedor_id ?? null,
-          total: Number(Number(r.total_expenses || 0).toFixed(2)),
-        })),
-      },
-    });
+    res.json({ success: true, limit, data });
   } catch (error) {
-    console.error('GET /api/reports/sales error:', error);
+    console.error('❌ invoices/latest:', error);
     res.status(500).json({
       success: false,
-      message: 'Error interno del servidor',
-      details: process.env.NODE_ENV !== 'production' ? error.message : undefined
+      error: 'Error al obtener los últimos pedidos',
+      details: error.message
     });
   }
 });
 
-
-
 module.exports = router;
+
