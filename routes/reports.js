@@ -3,10 +3,10 @@
 
 const express = require('express');
 const router = express.Router();
-const { Op, fn, col, literal, QueryTypes } = require('sequelize');
+const { Op, fn, literal, QueryTypes } = require('sequelize');
 const { sequelize } = require('../db');
 
-// Modelos empaquetados para reportes (como ya tenías)
+// Modelos empaquetados para reportes
 const { Invoice, Productsale } = require('../models/Report');
 
 /* ============================
@@ -53,8 +53,8 @@ function rdRangeFromParams(startStr, endStr) {
 const n = (v) => Number(v || 0);
 
 /* =========================================
- * RUTA: Ventas del día (lista de facturas)
  * GET /api/reports/today?withProducts=0|1
+ * Lista de facturas del día RD
  * ========================================= */
 router.get('/today', async (req, res) => {
   try {
@@ -80,18 +80,17 @@ router.get('/today', async (req, res) => {
 });
 
 /* =========================================================
- * RUTA: Resumen del día RD
  * GET /api/reports/summary-today
- *   - Totales general/contado/crédito (crédito contado en positivo)
- *   - Totales por vendedor
- *   - Totales por producto
+ * Resumen del día RD:
+ *  - Totales general/contado/crédito (crédito en positivo)
+ *  - Totales por vendedor
+ *  - Totales por producto (qty y amount)
  * ========================================================= */
 router.get('/summary-today', async (req, res) => {
   const t = await sequelize.transaction();
   try {
     const { start, end } = rdDayBounds(new Date());
 
-    // Traer facturas (raw para sumar en JS)
     const invoices = await Invoice.findAll({
       where: { date_time: { [Op.between]: [start, end] } },
       raw: true,
@@ -103,7 +102,6 @@ router.get('/summary-today', async (req, res) => {
     let total_credito = 0;
     const bySeller = new Map();
 
-    // Créditos pueden estar grabados negativos. Tomamos ABS para totales.
     invoices.forEach(inv => {
       const totalAbs = Math.abs(Number(inv.total) || 0);
       const method = String(inv.payment_method || '').toLowerCase();
@@ -122,9 +120,13 @@ router.get('/summary-today', async (req, res) => {
       if (method === 'credit') agg.total_credito += totalAbs; else agg.total_contado += totalAbs;
     });
 
-    // Totales por producto (qty y amount, desde productsales unidos a facturas del día)
     const productRows = await Productsale.findAll({
-      include: [{ model: Invoice, required: true, where: { date_time: { [Op.between]: [start, end] } }, attributes: [] }],
+      include: [{
+        model: Invoice,
+        required: true,
+        where: { date_time: { [Op.between]: [start, end] } },
+        attributes: []
+      }],
       attributes: [
         'product_id',
         'product_name',
@@ -168,9 +170,8 @@ router.get('/summary-today', async (req, res) => {
 });
 
 /* =========================================================
- * RUTA: Reporte de ventas por rango (simple)
  * GET /api/reports/salesreport?from=YYYY-MM-DD&to=YYYY-MM-DD
- * (Mantengo tu versión original)
+ * Reporte simple (versión original)
  * ========================================================= */
 router.get('/salesreport', async (req, res) => {
   try {
@@ -207,8 +208,8 @@ router.get('/salesreport', async (req, res) => {
 });
 
 /* =========================================================
- * RUTA: Productos por factura
  * GET /api/reports/fetchproductswithinvoicenumber/:invoice_number
+ * Productos por factura
  * ========================================================= */
 router.get('/fetchproductswithinvoicenumber/:invoice_number', async (req, res) => {
   try {
@@ -222,9 +223,8 @@ router.get('/fetchproductswithinvoicenumber/:invoice_number', async (req, res) =
 });
 
 /* =========================================================
- * RUTA: Alta de reporte (factura + detalle)
  * POST /api/reports/addreport
- * (Mantengo tu versión original)
+ * Alta de reporte (factura + detalle) — versión original
  * ========================================================= */
 router.post('/addreport', async (req, res) => {
   const transaction = await sequelize.transaction();
@@ -271,31 +271,23 @@ router.post('/addreport', async (req, res) => {
 });
 
 /* =========================================================
- * RUTA NUEVA/ACTUALIZADA: Reporte integral con egresos y COGS
  * GET /api/reports/sales?start=YYYY-MM-DD&end=YYYY-MM-DD&vendedor_id=##
- *
- * Devuelve:
- * {
- *   success, range: {start,end},
- *   byVendor: [{vendedor_id, cantidad, total_general, total_contado, total_credito}],
- *   totals: {
- *     countSales, grandTotal, total_contado, total_credito,
- *     expenses_total, net_after_expenses,
- *     cogs_total, profit
- *   },
- *   expenses: { byDay: [{fecha,total}], byVendor: [{vendedor_id,total}] }
- * }
+ * Reporte integral:
+ *  - Ventas por vendedor
+ *  - Egresos (total, por día, por vendedor)
+ *  - COGS (total y por vendedor)
+ *  - Ganancias y netos por vendedor
  * ========================================================= */
 router.get('/sales', async (req, res) => {
   try {
     const { start, end, vendedor_id } = req.query;
     const { startDate, endDate, startYMD, endYMD } = rdRangeFromParams(start, end);
 
-    // Filtro base
+    // Filtro base de facturas
     const whereBase = { date_time: { [Op.between]: [startDate, endDate] } };
     if (vendedor_id) whereBase.vendedor_id = Number(vendedor_id);
 
-    // ---------- Totales por vendedor (ventas en positivo) ----------
+    // ---------- Ventas por vendedor (totales en positivo) ----------
     const byVendorRows = await Invoice.findAll({
       attributes: [
         'vendedor_id',
@@ -326,8 +318,8 @@ router.get('/sales', async (req, res) => {
     const totalContado  = Number(n(totalsRow?.total_contado).toFixed(2));
     const totalCredito  = Number(n(totalsRow?.total_credito).toFixed(2));
 
-    // ---------- Egresos (vendor_expenses) ----------
-    // NOTA: vendor_expenses.fecha es DATE (YYYY-MM-DD). Usamos rango inclusivo de fechas YMD.
+    // ---------- Egresos ----------
+    // vendor_expenses.fecha es DATE (YYYY-MM-DD) → usamos rango YMD inclusivo
     const whereVendor = vendedor_id ? ' AND COALESCE(vendedor_id,0) = :vId' : '';
 
     const [expTotalRow] = await sequelize.query(
@@ -336,7 +328,6 @@ router.get('/sales', async (req, res) => {
        WHERE fecha BETWEEN :s AND :e ${whereVendor}`,
       { type: QueryTypes.SELECT, replacements: { s: startYMD, e: endYMD, vId: vendedor_id || null } }
     );
-
     const expenses_total = Number(n(expTotalRow?.total).toFixed(2));
 
     const expensesByDay = await sequelize.query(
@@ -357,8 +348,7 @@ router.get('/sales', async (req, res) => {
       { type: QueryTypes.SELECT, replacements: { s: startYMD, e: endYMD, vId: vendedor_id || null } }
     );
 
-    // ---------- COGS (Costo de mercancía vendida) ----------
-    // Se calcula con productsales * products.o_price, filtrando por rango vía invoices
+    // ---------- COGS (global) ----------
     const cogsRow = await sequelize.query(
       `SELECT COALESCE(SUM(ps.qty * CAST(COALESCE(NULLIF(p.o_price,''), '0') AS DECIMAL(12,2))), 0) AS cogs
        FROM productsales ps
@@ -373,20 +363,68 @@ router.get('/sales', async (req, res) => {
     );
     const cogs_total = Number(n(cogsRow?.[0]?.cogs ?? cogsRow?.cogs).toFixed(2));
 
-    // ---------- Netos ----------
+    // ---------- COGS por vendedor ----------
+    const cogsByVendor = await sequelize.query(
+      `
+      SELECT
+        COALESCE(i.vendedor_id, 0) AS vendedor_id,
+        COALESCE(
+          SUM(
+            ps.qty *
+            CAST(
+              NULLIF(
+                REPLACE(REPLACE(REPLACE(COALESCE(p.o_price,'0'), ',', ''), 'RD$', ''), '$', ''),
+                ''
+              ) AS DECIMAL(12,2)
+            )
+          ), 0
+        ) AS cogs
+      FROM productsales ps
+      INNER JOIN invoices i ON i.invoice_number = ps.invoice_number
+      LEFT JOIN products  p ON p.id = ps.product_id
+      WHERE DATE(i.date_time) BETWEEN :s AND :e
+      ${vendedor_id ? 'AND i.vendedor_id = :vId' : ''}
+      GROUP BY COALESCE(i.vendedor_id, 0)
+      ORDER BY vendedor_id ASC
+      `,
+      {
+        type: QueryTypes.SELECT,
+        replacements: { s: startYMD, e: endYMD, vId: vendedor_id || null }
+      }
+    );
+
+    // ---------- Armar mapa de egresos y COGS por vendedor ----------
+    const expMap  = new Map((expensesByVendor || []).map(r => [String(r.vendedor_id ?? 0), Number(r.total) || 0]));
+    const cogsMap = new Map((cogsByVendor    || []).map(r => [String(r.vendedor_id ?? 0), Number(r.cogs)  || 0]));
+
+    // ---------- byVendor final con expenses / cogs / profit / net_after_expenses ----------
+    const byVendor = (byVendorRows || []).map(r => {
+      const idKey = String(r.vendedor_id ?? 0);
+      const total_general = Number(r.total_general) || 0;
+      const expenses = expMap.get(idKey) || 0;
+      const cogs     = cogsMap.get(idKey) || 0;
+
+      return {
+        vendedor_id: r.vendedor_id ?? null,
+        cantidad: Number(r.cantidad) || 0,
+        total_general: Number(total_general.toFixed(2)),
+        total_contado: Number(n(r.total_contado).toFixed(2)),
+        total_credito: Number(n(r.total_credito).toFixed(2)),
+        expenses: Number(expenses.toFixed(2)),
+        net_after_expenses: Number((total_general - expenses).toFixed(2)),
+        cogs: Number(cogs.toFixed(2)),
+        profit: Number((total_general - cogs).toFixed(2)),
+      };
+    });
+
+    // ---------- Totales netos y ganancias (global) ----------
     const net_after_expenses = Number((grandTotal - expenses_total).toFixed(2));
     const profit             = Number((grandTotal - cogs_total).toFixed(2));
 
     res.json({
       success: true,
       range: { start: startYMD, end: endYMD },
-      byVendor: byVendorRows.map(r => ({
-        vendedor_id: r.vendedor_id ?? null,
-        cantidad: n(r.cantidad),
-        total_general: Number(n(r.total_general).toFixed(2)),
-        total_contado: Number(n(r.total_contado).toFixed(2)),
-        total_credito: Number(n(r.total_credito).toFixed(2)),
-      })),
+      byVendor,
       totals: {
         countSales,
         grandTotal,
@@ -398,7 +436,8 @@ router.get('/sales', async (req, res) => {
         profit
       },
       expenses: {
-        byDay: expensesByDay.map(r => ({ fecha: r.fecha, total: Number(n(r.total).toFixed(2)) })),
+        // importante: devolver "date" (no "fecha") para que el front lo lea
+        byDay: expensesByDay.map(r => ({ date: r.fecha, total: Number(n(r.total).toFixed(2)) })),
         byVendor: expensesByVendor.map(r => ({ vendedor_id: r.vendedor_id, total: Number(n(r.total).toFixed(2)) }))
       }
     });
@@ -409,5 +448,6 @@ router.get('/sales', async (req, res) => {
 });
 
 module.exports = router;
+
 
 
