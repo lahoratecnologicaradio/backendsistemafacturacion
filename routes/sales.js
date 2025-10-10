@@ -613,7 +613,7 @@ router.post('/invoices/pay/:invoice_number', async (req, res) => {
     }
 
     const rawTotal = Number(invoice.total) || 0;
-    the const absTotal = Math.abs(rawTotal);
+    const absTotal = Math.abs(rawTotal);
     const alreadyPaid = Number(invoice.paid_amount || 0);
     const currentBalance = Math.max(absTotal - alreadyPaid, 0);
 
