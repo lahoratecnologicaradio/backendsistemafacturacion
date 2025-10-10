@@ -100,6 +100,34 @@ const transporter = nodemailer.createTransport({
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Helper para construir filas de productsales EXACTAMENTE con:
+// invoice_number, product_id, product_name, price, qty, discount, amount
+// ─────────────────────────────────────────────────────────────────────────────
+function buildProductSalesRows(invoiceNumber, rawItems) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) return [];
+  return rawItems.map((it) => {
+    const product_id   = it.product_id ?? it.productId ?? it.id ?? null;
+    const product_name = it.product_name ?? it.name ?? it.title ?? '';
+    const qty          = Number(it.qty ?? it.quantity ?? it.cantidad ?? 0) || 0;
+    const price        = Number(it.price ?? it.unit_price ?? it.precio ?? 0) || 0;
+    const discount     = Number(it.discount ?? it.descuento ?? 0) || 0;
+    const amount       = (it.amount != null)
+      ? Number(it.amount)
+      : Number((price * qty - discount).toFixed(2));
+
+    return {
+      invoice_number: invoiceNumber,
+      product_id,
+      product_name,
+      price,
+      qty,
+      discount,
+      amount
+    };
+  }).filter(r => r.product_id != null && r.qty > 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // LISTAR TODAS
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/fetchallsales', async (_req, res) => {
@@ -153,19 +181,16 @@ router.get('/invoices/seller/:vendedorId', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CREAR FACTURA + Actualizar qty + Email de venta
+// CREAR FACTURA + actualizar qty + email
 // Body:
 // {
 //   invoice_number, date_time, customer_name, total, cash, change,
 //   vendedor_id, payment_method ('cash'|'credit'),
 //   customer_id?, zona?,
 //   items|products|cartItems: [
-//     { product_id|id|productId, product_name|name|title, quantity|qty|cantidad, price|unit_price|precio, subtotal? }
+//     { product_id|id|productId, product_name|name|title, quantity|qty|cantidad, price|unit_price|precio, discount?, amount? }
 //   ]
 // }
-// ─────────────────────────────────────────────────────────────────────────────
-// ─────────────────────────────────────────────────────────────────────────────
-// CREAR FACTURA + actualizar qty + email
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/addsale', async (req, res) => {
   const t = await sequelize.transaction();
@@ -236,46 +261,18 @@ router.post('/addsale', async (req, res) => {
           ? req.body.cartItems
           : [];
 
-    // Guardaremos info para el correo
+    // Guardaremos info para el correo y actualización de inventario
     const itemsWithQty = [];
 
-    // 3) Guardar detalle si el modelo existe
+    // 3) Guardar detalle en productsales (si existe el modelo)
     if (ProductSale && rawItems.length > 0) {
-      const fkInvoiceId =
-        ProductSale.rawAttributes?.invoice_number ? 'invoice_number'
-        : ProductSale.rawAttributes?.invoice_id ? 'invoice_id'
-        : null;
-
-      const commonCols = {
-        ...(ProductSale.rawAttributes?.vendedor_id ? { vendedor_id: vendedor_id ?? null } : {}),
-        ...(ProductSale.rawAttributes?.customer_id ? { customer_id: customer_id ?? null } : {})
-      };
-
-      const rows = rawItems.map((it, idx) => {
-        const product_id   = it.product_id ?? it.productId ?? it.id ?? null;
-        const product_name = it.product_name ?? it.name ?? it.title ?? '';
-        const quantity     = Number(it.quantity ?? it.qty ?? it.cantidad ?? 1);
-        const unit_price   = Number(it.price ?? it.unit_price ?? it.precio ?? 0);
-        const subtotal     = it.subtotal != null ? Number(it.subtotal) : Number((unit_price * quantity).toFixed(2));
-        const base = {
-          product_id, product_name, quantity, unit_price, subtotal,
-          line_number: (idx + 1),
-          ...commonCols
-        };
-        if (fkInvoiceId === 'invoice_number') base.invoice_number = invoice_number;
-        else if (fkInvoiceId === 'invoice_id') base.invoice_id = invoice_number;
-        return base;
-      });
-
-      const allowed = Object.keys(ProductSale.rawAttributes);
-      const sanitizedRows = rows.map(r => {
-        const out = {};
-        for (const k of Object.keys(r)) if (allowed.includes(k)) out[k] = r[k];
-        return out;
-      });
-
-      if (sanitizedRows.length > 0) {
-        await ProductSale.bulkCreate(sanitizedRows, { transaction: t });
+      try {
+        const rows = buildProductSalesRows(invoice_number, rawItems);
+        if (rows.length > 0) {
+          await ProductSale.bulkCreate(rows, { transaction: t });
+        }
+      } catch (e) {
+        console.warn('[addsale] No se pudo guardar productsales:', e?.message);
       }
     }
 
@@ -290,7 +287,10 @@ router.post('/addsale', async (req, res) => {
         const product_name = it.product_name ?? it.name ?? it.title ?? `ID ${product_id}`;
         const quantity     = Math.max(0, Number(it.quantity ?? it.qty ?? it.cantidad ?? 0) || 0);
         const unit_price   = Number(it.price ?? it.unit_price ?? it.precio ?? 0);
-        const subtotal     = it.subtotal != null ? Number(it.subtotal) : Number((unit_price * quantity).toFixed(2));
+        const discount     = Number(it.discount ?? 0) || 0;
+        const subtotal     = (it.amount != null)
+          ? Number(it.amount)
+          : Number((unit_price * quantity - discount).toFixed(2));
 
         let qtyBefore = null;
         let qtyAfter  = null;
@@ -312,7 +312,6 @@ router.post('/addsale', async (req, res) => {
             qtyBefore = Number(beforeRow.get('qty')) || 0;
 
             // UPDATE portable: qty = CASE WHEN qty >= :by THEN qty - :by ELSE 0 END
-            // Usamos sequelize.literal para conservar updatedAt y hooks del modelo.
             const [affected] = await Product.update(
               { qty: sequelize.literal(`CASE WHEN qty >= ${quantity} THEN qty - ${quantity} ELSE 0 END`) },
               { where: { id: product_id }, transaction: t }
@@ -464,6 +463,7 @@ router.get('/getsale/:invoice_number', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 /** ACTUALIZAR POR invoice_number
  *  - si envías payment_method/paid_amount/paid_at también se actualizan
+ *  - si envías items/products/cartItems se REEMPLAZA el detalle en productsales
  */
 router.put('/updatesale/:invoice_number', async (req, res) => {
   const t = await sequelize.transaction();
@@ -508,6 +508,34 @@ router.put('/updatesale/:invoice_number', async (req, res) => {
     }
 
     await invoice.update(updates, { transaction: t });
+
+    // Reemplazar detalle si llegan items/products/cartItems
+    try {
+      const rawItems = Array.isArray(req.body.items)
+        ? req.body.items
+        : Array.isArray(req.body.products)
+          ? req.body.products
+          : Array.isArray(req.body.cartItems)
+            ? req.body.cartItems
+            : [];
+
+      if (ProductSale && rawItems.length > 0) {
+        // borrar detalle anterior
+        await ProductSale.destroy({
+          where: { invoice_number: invoice.invoice_number },
+          transaction: t
+        });
+
+        // insertar detalle nuevo
+        const rows = buildProductSalesRows(invoice.invoice_number, rawItems);
+        if (rows.length > 0) {
+          await ProductSale.bulkCreate(rows, { transaction: t });
+        }
+      }
+    } catch (e) {
+      console.warn('[updatesale] No se pudo reemplazar productsales:', e?.message);
+    }
+
     await t.commit();
     res.json(invoice);
   } catch (error) {
@@ -518,7 +546,7 @@ router.put('/updatesale/:invoice_number', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ELIMINAR POR invoice_number
+// ELIMINAR POR invoice_number (borra también el detalle productsales)
 // ─────────────────────────────────────────────────────────────────────────────
 router.delete('/deletesale/:invoice_number', async (req, res) => {
   const t = await sequelize.transaction();
@@ -528,6 +556,19 @@ router.delete('/deletesale/:invoice_number', async (req, res) => {
       await t.rollback();
       return res.status(404).json({ error: 'Factura no encontrada' });
     }
+
+    // Borrar detalle asociado
+    if (ProductSale) {
+      try {
+        await ProductSale.destroy({
+          where: { invoice_number: req.params.invoice_number },
+          transaction: t
+        });
+      } catch (e) {
+        console.warn('[deletesale] No se pudo borrar productsales:', e?.message);
+      }
+    }
+
     await Invoice.destroy({ where: { invoice_number: req.params.invoice_number }, transaction: t });
     await t.commit();
     res.json({ success: true, message: 'Factura eliminada correctamente' });
@@ -676,8 +717,7 @@ router.post('/vendedor-stats', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // VENTAS DE UN DÍA ESPECÍFICO
 // GET /sales/by-day?date=YYYY-MM-DD[&vendedor_id=##]
-// GET /sales/day/:date              (misma lógica por parámetro de ruta)
-// Nota: Usa el huso horario del servidor; si necesitas TZ fijo, pásalo ya convertido.
+// GET /sales/day/:date
 // ─────────────────────────────────────────────────────────────────────────────
 router.get(['/by-day', '/day/:date'], async (req, res) => {
   try {
@@ -692,7 +732,6 @@ router.get(['/by-day', '/day/:date'], async (req, res) => {
     }
 
     // 2) Construimos rango [inicio, fin] del día
-    //    Si prefieres forzar horario de RD, transforma el string a UTC según tu server.
     const start = new Date(`${dateStr}T00:00:00.000`);
     const end   = new Date(`${dateStr}T23:59:59.999`);
 
@@ -730,7 +769,7 @@ router.get(['/by-day', '/day/:date'], async (req, res) => {
 
     // 5) Listado de facturas del día (normalizado: total en positivo)
     const whereList = {
-      date_time: { [Op.between]: [start, end] } // ← USO DE Op EN LUGAR DE sequelize.Op
+      date_time: { [Op.between]: [start, end] }
     };
     if (vendedorId) whereList.vendedor_id = vendedorId;
 
@@ -889,6 +928,6 @@ router.get('/invoices/latest', async (req, res) => {
   }
 });
 
-
 module.exports = router;
+
 
