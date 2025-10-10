@@ -1,60 +1,100 @@
 const VisitaProgramada = require('./VisitaProgramada');
-const ResultadoVisita = require('./ResultadoVisita');
-const Vendedor = require('./Vendedor');
-const Customer = require('./Customer');
+const ResultadoVisita  = require('./ResultadoVisita');
+const Vendedor         = require('./Vendedor');
+const Customer         = require('./Customer');
 
-// Definir las asociaciones
+// 👇 nuevos modelos para ventas
+const Invoice          = require('./Invoice');       // PK: invoice_number
+const ProductSale      = require('./ProductSale');   // tabla: productsales
+let Product;
+try {
+  Product = require('./Product');                    // ajusta si tu archivo se llama Products/Producto
+} catch (_) {
+  try { Product = require('./Products'); } catch(_) {
+    try { Product = require('./Producto'); } catch(_) { Product = null; }
+  }
+}
+
 function defineAssociations() {
-  // VisitaProgramada tiene un ResultadoVisita
+  // ————————————————————————————————————————————————————————————————
+  // Visitas programadas
+  // ————————————————————————————————————————————————————————————————
   VisitaProgramada.hasOne(ResultadoVisita, {
     foreignKey: 'visita_id',
-    as: 'resultado'
+    as: 'resultado',
   });
 
-  // ResultadoVisita pertenece a una VisitaProgramada
+  // ⚠️ Para evitar el error de alias duplicado, usa un alias distinto a 'visita'
   ResultadoVisita.belongsTo(VisitaProgramada, {
     foreignKey: 'visita_id',
-    as: 'visita'
+    as: 'visita_programada', // <-- antes 'visita'
   });
 
-  // VisitaProgramada pertenece a un Vendedor
   VisitaProgramada.belongsTo(Vendedor, {
     foreignKey: 'vendedor_id',
-    as: 'vendedor'
+    as: 'vendedor',
   });
 
-  // VisitaProgramada pertenece a un Customer
   VisitaProgramada.belongsTo(Customer, {
     foreignKey: 'customer_id',
-    as: 'cliente'
+    as: 'cliente',
   });
 
-  // Vendedor tiene muchas VisitaProgramada
   Vendedor.hasMany(VisitaProgramada, {
     foreignKey: 'vendedor_id',
-    as: 'visitas'
+    as: 'visitas',
   });
 
-  // Customer tiene muchas VisitaProgramada
   Customer.hasMany(VisitaProgramada, {
     foreignKey: 'customer_id',
-    as: 'visitas'
+    as: 'visitas',
   });
 
-  // NUEVAS ASOCIACIONES: Relación entre Vendedor y Customer
-  // Un Vendedor tiene muchos Customers
+  // Relación Vendedor ↔ Customer
   Vendedor.hasMany(Customer, {
     foreignKey: 'vendedor_id',
-    as: 'clientes'
+    as: 'clientes',
   });
 
-  // Un Customer pertenece a un Vendedor
   Customer.belongsTo(Vendedor, {
     foreignKey: 'vendedor_id',
-    as: 'vendedor'
+    as: 'vendedor',
   });
 
-  console.log('Asociaciones definidas correctamente');
+  // ————————————————————————————————————————————————————————————————
+  // Ventas (facturas + items)
+  // ————————————————————————————————————————————————————————————————
+  if (ProductSale && Invoice) {
+    // Invoice ↔ ProductSale (clave no-Id: invoice_number)
+    Invoice.hasMany(ProductSale, {
+      foreignKey: 'invoice_number',
+      sourceKey: 'invoice_number',
+      as: 'items',
+      constraints: false, // no exige FK físico en la DB
+    });
+
+    ProductSale.belongsTo(Invoice, {
+      foreignKey: 'invoice_number',
+      targetKey: 'invoice_number',
+      as: 'invoice',
+      constraints: false,
+    });
+  }
+
+  if (ProductSale && Product) {
+    // Product ↔ ProductSale (para ver ventas por producto)
+    Product.hasMany(ProductSale, {
+      foreignKey: 'product_id',
+      as: 'product_sales',
+    });
+
+    ProductSale.belongsTo(Product, {
+      foreignKey: 'product_id',
+      as: 'product',
+    });
+  }
+
+  console.log('✅ Asociaciones definidas correctamente');
 }
 
 module.exports = defineAssociations;
