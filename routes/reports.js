@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Op, fn, col, literal } = require('sequelize');
+const { Op, fn, col, literal, QueryTypes } = require('sequelize');
 const { sequelize } = require('../db');
 const { Invoice, Productsale } = require('../models/Report');
 
@@ -342,7 +342,6 @@ router.get('/sales', async (req, res) => {
     // --- helpers de rango en RD (incluyente) ---
     function rdRangeFromParams(startStr, endStr) {
       const now = new Date();
-      // hoy RD por defecto
       const tzNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/Santo_Domingo' }));
       const y = tzNow.getFullYear();
       const m = String(tzNow.getMonth() + 1).padStart(2, '0');
@@ -352,7 +351,7 @@ router.get('/sales', async (req, res) => {
       const s = (startStr || todayYMD);
       const e = (endStr   || s);
 
-      // Limites en zona RD (UTC-04:00) inclusivos
+      // Límites RD (UTC-04:00) inclusivos
       const startDate = new Date(`${s}T00:00:00-04:00`);
       const endDate   = new Date(`${e}T23:59:59.999-04:00`);
       return { startDate, endDate, startYMD: s, endYMD: e };
@@ -360,17 +359,14 @@ router.get('/sales', async (req, res) => {
 
     const { startDate, endDate, startYMD, endYMD } = rdRangeFromParams(start, end);
 
-    // Filtro base
+    // Filtro base para facturas
     const whereBase = {
       date_time: { [Op.between]: [startDate, endDate] }
     };
     if (vendedor_id) whereBase.vendedor_id = Number(vendedor_id);
 
-    // --- Totales por vendedor ---
-    // cantidad: COUNT(*)
-    // total_general: SUM(total)
-    // total_contado: SUM(CASE WHEN payment_method='credit' THEN 0 ELSE total END)
-    // total_credito: SUM(CASE WHEN payment_method='credit' THEN total ELSE 0 END)
+    // ---------- VENTAS ----------
+    // Totales por vendedor
     const byVendorRows = await Invoice.findAll({
       attributes: [
         'vendedor_id',
@@ -384,7 +380,7 @@ router.get('/sales', async (req, res) => {
       raw: true
     });
 
-    // --- Totales generales ---
+    // Totales globales
     const totalsRow = await Invoice.findOne({
       attributes: [
         [fn('COUNT', literal('*')), 'countSales'],
@@ -396,24 +392,143 @@ router.get('/sales', async (req, res) => {
       raw: true
     });
 
+    // ---------- EGRESOS ----------
+    const replacementsBaseDates = {
+      s: startYMD,       // vendor_expenses.fecha es DATE
+      e: endYMD,
+      vid: vendedor_id ? Number(vendedor_id) : null
+    };
+
+    // Total de egresos del rango
+    const expensesTotalRows = await sequelize.query(
+      `
+      SELECT COALESCE(SUM(monto),0) AS total_expenses
+      FROM vendor_expenses
+      WHERE fecha BETWEEN :s AND :e
+      ${vendedor_id ? ' AND vendedor_id = :vid' : ''}
+      `,
+      { replacements: replacementsBaseDates, type: QueryTypes.SELECT }
+    );
+    const expenses_total = Number((expensesTotalRows[0]?.total_expenses || 0));
+
+    // Egresos por vendedor
+    const expensesByVendor = await sequelize.query(
+      `
+      SELECT vendedor_id, COALESCE(SUM(monto),0) AS total_expenses
+      FROM vendor_expenses
+      WHERE fecha BETWEEN :s AND :e
+      ${vendedor_id ? ' AND vendedor_id = :vid' : ''}
+      GROUP BY vendedor_id
+      `,
+      { replacements: replacementsBaseDates, type: QueryTypes.SELECT }
+    );
+
+    // Egresos por día
+    const expensesByDay = await sequelize.query(
+      `
+      SELECT fecha AS date, COALESCE(SUM(monto),0) AS total
+      FROM vendor_expenses
+      WHERE fecha BETWEEN :s AND :e
+      ${vendedor_id ? ' AND vendedor_id = :vid' : ''}
+      GROUP BY fecha
+      ORDER BY fecha ASC
+      `,
+      { replacements: replacementsBaseDates, type: QueryTypes.SELECT }
+    );
+
+    // ---------- COGS (costo de compra de lo vendido) ----------
+    // OJO: ajusta nombres de tablas si difieren:
+    // - productsales  -> tabla de items vendidos (Productsale)
+    // - products      -> tabla de productos (con o_price)
+    const replacementsCogs = {
+      start: startDate,
+      end: endDate,
+      vid: vendedor_id ? Number(vendedor_id) : null
+    };
+
+    // COGS total
+    const cogsTotalRows = await sequelize.query(
+      `
+      SELECT COALESCE(SUM(ps.qty * COALESCE(p.o_price,0)),0) AS cogs_total
+      FROM productsales ps
+      JOIN invoices i   ON i.invoice_number = ps.invoice_number
+      LEFT JOIN products p ON p.id = ps.product_id
+      WHERE i.date_time BETWEEN :start AND :end
+      ${vendedor_id ? ' AND i.vendedor_id = :vid' : ''}
+      `,
+      { replacements: replacementsCogs, type: QueryTypes.SELECT }
+    );
+    const cogs_total = Number((cogsTotalRows[0]?.cogs_total || 0));
+
+    // COGS por vendedor
+    const cogsByVendorRows = await sequelize.query(
+      `
+      SELECT i.vendedor_id, COALESCE(SUM(ps.qty * COALESCE(p.o_price,0)),0) AS cogs
+      FROM productsales ps
+      JOIN invoices i   ON i.invoice_number = ps.invoice_number
+      LEFT JOIN products p ON p.id = ps.product_id
+      WHERE i.date_time BETWEEN :start AND :end
+      ${vendedor_id ? ' AND i.vendedor_id = :vid' : ''}
+      GROUP BY i.vendedor_id
+      `,
+      { replacements: replacementsCogs, type: QueryTypes.SELECT }
+    );
+
+    // ---------- Ensamblado de respuesta ----------
     const safeNumber = (v) => Number(v || 0);
+
+    // Índices auxiliares para egresos/COGS por vendedor
+    const expByVendorMap = new Map();
+    expensesByVendor.forEach(r => expByVendorMap.set(String(r.vendedor_id ?? 'null'), Number(r.total_expenses || 0)));
+
+    const cogsByVendorMap = new Map();
+    cogsByVendorRows.forEach(r => cogsByVendorMap.set(String(r.vendedor_id ?? 'null'), Number(r.cogs || 0)));
+
+    // byVendor enriquecido
+    const byVendor = byVendorRows.map(r => {
+      const key = String(r.vendedor_id ?? 'null');
+      const vExpenses = expByVendorMap.get(key) || 0;
+      const vCogs     = cogsByVendorMap.get(key) || 0;
+      const totalGen  = safeNumber(r.total_general);
+      return {
+        vendedor_id: r.vendedor_id ?? null,
+        cantidad: safeNumber(r.cantidad),
+        total_general: Number(totalGen.toFixed(2)),
+        total_contado: Number(safeNumber(r.total_contado).toFixed(2)),
+        total_credito: Number(safeNumber(r.total_credito).toFixed(2)),
+        expenses: Number(vExpenses.toFixed(2)),
+        net_after_expenses: Number((totalGen - vExpenses).toFixed(2)),
+        cogs: Number(vCogs.toFixed(2)),
+        profit: Number((totalGen - vCogs).toFixed(2)), // ganancia = ventas - costo compra
+      };
+    });
+
+    const totals = {
+      countSales: safeNumber(totalsRow?.countSales),
+      grandTotal: Number(safeNumber(totalsRow?.grandTotal).toFixed(2)),
+      total_contado: Number(safeNumber(totalsRow?.total_contado).toFixed(2)),
+      total_credito: Number(safeNumber(totalsRow?.total_credito).toFixed(2)),
+      expenses_total: Number(expenses_total.toFixed(2)),
+      net_after_expenses: Number((safeNumber(totalsRow?.grandTotal) - expenses_total).toFixed(2)),
+      cogs_total: Number(cogs_total.toFixed(2)),
+      profit: Number((safeNumber(totalsRow?.grandTotal) - cogs_total).toFixed(2)),
+    };
 
     res.json({
       success: true,
       range: { start: startYMD, end: endYMD },
-      byVendor: byVendorRows.map(r => ({
-        vendedor_id: r.vendedor_id ?? null,
-        cantidad: safeNumber(r.cantidad),
-        total_general: Number(safeNumber(r.total_general).toFixed(2)),
-        total_contado: Number(safeNumber(r.total_contado).toFixed(2)),
-        total_credito: Number(safeNumber(r.total_credito).toFixed(2)),
-      })),
-      totals: {
-        countSales: safeNumber(totalsRow?.countSales),
-        grandTotal: Number(safeNumber(totalsRow?.grandTotal).toFixed(2)),
-        total_contado: Number(safeNumber(totalsRow?.total_contado).toFixed(2)),
-        total_credito: Number(safeNumber(totalsRow?.total_credito).toFixed(2)),
-      }
+      byVendor,
+      totals,
+      expenses: {
+        byDay: expensesByDay.map(r => ({
+          date: r.date,                       // YYYY-MM-DD
+          total: Number(Number(r.total || 0).toFixed(2)),
+        })),
+        byVendor: expensesByVendor.map(r => ({
+          vendedor_id: r.vendedor_id ?? null,
+          total: Number(Number(r.total_expenses || 0).toFixed(2)),
+        })),
+      },
     });
   } catch (error) {
     console.error('GET /api/reports/sales error:', error);
@@ -424,6 +539,7 @@ router.get('/sales', async (req, res) => {
     });
   }
 });
+
 
 
 module.exports = router;
