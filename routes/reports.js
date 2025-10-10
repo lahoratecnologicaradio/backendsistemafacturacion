@@ -327,4 +327,103 @@ router.post('/addreport', async (req, res) => {
   }
 });
 
+// =============================
+// RUTA: /api/reports/sales
+// Query:
+//   ?start=YYYY-MM-DD
+//   ?end=YYYY-MM-DD
+//   ?vendedor_id=123   (opcional)
+// Si no mandas start/end, usa el día de hoy en horario RD.
+// =============================
+router.get('/sales', async (req, res) => {
+  try {
+    const { start, end, vendedor_id } = req.query;
+
+    // --- helpers de rango en RD (incluyente) ---
+    function rdRangeFromParams(startStr, endStr) {
+      const now = new Date();
+      // hoy RD por defecto
+      const tzNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/Santo_Domingo' }));
+      const y = tzNow.getFullYear();
+      const m = String(tzNow.getMonth() + 1).padStart(2, '0');
+      const d = String(tzNow.getDate()).padStart(2, '0');
+      const todayYMD = `${y}-${m}-${d}`;
+
+      const s = (startStr || todayYMD);
+      const e = (endStr   || s);
+
+      // Limites en zona RD (UTC-04:00) inclusivos
+      const startDate = new Date(`${s}T00:00:00-04:00`);
+      const endDate   = new Date(`${e}T23:59:59.999-04:00`);
+      return { startDate, endDate, startYMD: s, endYMD: e };
+    }
+
+    const { startDate, endDate, startYMD, endYMD } = rdRangeFromParams(start, end);
+
+    // Filtro base
+    const whereBase = {
+      date_time: { [Op.between]: [startDate, endDate] }
+    };
+    if (vendedor_id) whereBase.vendedor_id = Number(vendedor_id);
+
+    // --- Totales por vendedor ---
+    // cantidad: COUNT(*)
+    // total_general: SUM(total)
+    // total_contado: SUM(CASE WHEN payment_method='credit' THEN 0 ELSE total END)
+    // total_credito: SUM(CASE WHEN payment_method='credit' THEN total ELSE 0 END)
+    const byVendorRows = await Invoice.findAll({
+      attributes: [
+        'vendedor_id',
+        [fn('COUNT', literal('*')), 'cantidad'],
+        [fn('SUM', col('total')), 'total_general'],
+        [fn('SUM', literal(`CASE WHEN payment_method = 'credit' THEN 0 ELSE total END`)), 'total_contado'],
+        [fn('SUM', literal(`CASE WHEN payment_method = 'credit' THEN total ELSE 0 END`)), 'total_credito'],
+      ],
+      where: whereBase,
+      group: ['vendedor_id'],
+      raw: true
+    });
+
+    // --- Totales generales ---
+    const totalsRow = await Invoice.findOne({
+      attributes: [
+        [fn('COUNT', literal('*')), 'countSales'],
+        [fn('SUM', col('total')), 'grandTotal'],
+        [fn('SUM', literal(`CASE WHEN payment_method = 'credit' THEN 0 ELSE total END`)), 'total_contado'],
+        [fn('SUM', literal(`CASE WHEN payment_method = 'credit' THEN total ELSE 0 END`)), 'total_credito'],
+      ],
+      where: whereBase,
+      raw: true
+    });
+
+    const safeNumber = (v) => Number(v || 0);
+
+    res.json({
+      success: true,
+      range: { start: startYMD, end: endYMD },
+      byVendor: byVendorRows.map(r => ({
+        vendedor_id: r.vendedor_id ?? null,
+        cantidad: safeNumber(r.cantidad),
+        total_general: Number(safeNumber(r.total_general).toFixed(2)),
+        total_contado: Number(safeNumber(r.total_contado).toFixed(2)),
+        total_credito: Number(safeNumber(r.total_credito).toFixed(2)),
+      })),
+      totals: {
+        countSales: safeNumber(totalsRow?.countSales),
+        grandTotal: Number(safeNumber(totalsRow?.grandTotal).toFixed(2)),
+        total_contado: Number(safeNumber(totalsRow?.total_contado).toFixed(2)),
+        total_credito: Number(safeNumber(totalsRow?.total_credito).toFixed(2)),
+      }
+    });
+  } catch (error) {
+    console.error('GET /api/reports/sales error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+      details: process.env.NODE_ENV !== 'production' ? error.message : undefined
+    });
+  }
+});
+
+
 module.exports = router;
