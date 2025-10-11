@@ -5,7 +5,7 @@ const { sequelize } = require('../db');
 
 // Tabla sugerida: correo_configuracion (id, correo)
 // Si tu tabla se llama distinto, ajusta "tableName".
-const CorreoConfiguracion = sequelize.define('CorreoConfiguracion', {
+const CorreoConfiguracion = sequelize.define('configuracion', {
   id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
   correo: { type: DataTypes.STRING(190), allowNull: false }
 }, {
