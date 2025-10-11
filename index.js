@@ -494,11 +494,14 @@ app.use('/api/products', require('./routes/products'));
 app.use('/api/customers', require('./routes/customers'));
 app.use('/api/suppliers', require('./routes/suppliers'));
 app.use('/api/reports', require('./routes/reports'));
+app.use('/api/config', require('./routes/config'));
 app.use('/api/sales', require('./routes/sales'));
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/sync', require('./routes/sync'));
 app.use('/api/vendedores', vendedoresRoutes);
 app.use('/api/visitas', visitasRoutes);
+
+
 
 // ====== Endpoint AI: Transcribir audio ======
 /*
