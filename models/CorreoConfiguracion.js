@@ -9,7 +9,7 @@ const CorreoConfiguracion = sequelize.define('CorreoConfiguracion', {
   id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
   correo: { type: DataTypes.STRING(190), allowNull: false }
 }, {
-  tableName: 'correo_configuracion',
+  tableName: 'configuracion',
   timestamps: false
 });
 
