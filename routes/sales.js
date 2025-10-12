@@ -81,7 +81,7 @@ const LOW_STOCK_THRESHOLD = Number(process.env.LOW_STOCK_THRESHOLD || 1000);
 // ─────────────────────────────────────────────────────────────────────────────
 const mailFrom = process.env.MAIL_FROM || process.env.SMTP_USER || 'ventas@example.com';
 // Fallback si no hay registro en DB:
-const FALLBACK_MAIL_TO = process.env.SALES_TO || process.env.MAIL_TO || 'ventas@example.com';
+const FALLBACK_MAIL_TO = process.env.SALES_TO || process.env.MAIL_TO || null;
 
 const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com';
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
@@ -101,28 +101,27 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// Lee el correo destino desde la tabla correo_configuracion.
-// Regresa el correo activo más reciente o el fallback si no hay.
-async function getSalesEmailTo() {
+// ─────────────────────────────────────────────────────────────────────────────
+// Obtiene el correo de destino desde la tabla `correo_configuracion` (SIN activo).
+// Devuelve el último registro por id. Si no hay, retorna null para que el caller
+// decida el fallback.
+// ─────────────────────────────────────────────────────────────────────────────
+async function getSalesEmailToFromDB() {
   try {
-    // Si tu tabla NO tiene columna 'activo', elimina "WHERE activo=1"
     const rows = await sequelize.query(
       `SELECT correo
          FROM correo_configuracion
-        WHERE COALESCE(activo, 1) = 1
         ORDER BY id DESC
         LIMIT 1`,
       { type: QueryTypes.SELECT }
     );
     const correo = rows?.[0]?.correo ? String(rows[0].correo).trim() : null;
-
     if (correo) return correo;
-
-    console.warn('[sales] No se encontró correo activo en correo_configuracion; usando fallback.');
-    return FALLBACK_MAIL_TO;
+    console.warn('[sales] No hay registros en correo_configuracion.');
+    return null;
   } catch (e) {
-    console.warn('[sales] Error leyendo correo_configuracion; usando fallback. Detalle:', e?.message);
-    return FALLBACK_MAIL_TO;
+    console.warn('[sales] Error consultando correo_configuracion:', e?.message);
+    return null;
   }
 }
 
@@ -318,7 +317,6 @@ router.post('/addsale', async (req, res) => {
         } else if (quantity <= 0) {
           console.warn(`[sales/addsale] Cantidad <= 0 para producto ${product_id}; no se descuenta qty.`);
         } else {
-          // Leer qty actual (solo para mostrar en correo/log)
           const beforeRow = await Product.findByPk(product_id, {
             attributes: ['id', 'product_name', QTY_FIELD],
             transaction: t
@@ -329,7 +327,6 @@ router.post('/addsale', async (req, res) => {
           } else {
             qtyBefore = Number(beforeRow.get(QTY_FIELD)) || 0;
 
-            // UPDATE portable: qty = CASE WHEN qty >= :by THEN qty - :by ELSE 0 END
             const [affected] = await Product.update(
               { [QTY_FIELD]: sequelize.literal(`CASE WHEN ${QTY_FIELD} >= ${quantity} THEN ${QTY_FIELD} - ${quantity} ELSE 0 END`) },
               { where: { id: product_id }, transaction: t }
@@ -441,8 +438,16 @@ router.post('/addsale', async (req, res) => {
           </div>
         `;
 
-        // ←↓↓ correo destino desde DB
-        const mailToRuntime = await getSalesEmailTo();
+        // 1) Intentar leer desde DB
+        let mailToRuntime = await getSalesEmailToFromDB();
+
+        // 2) Fallbacks si la DB no devolvió nada usable
+        if (!mailToRuntime || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(mailToRuntime)) {
+          console.warn(`[sales/addsale] Correo DB inválido o ausente (${mailToRuntime}). Usando fallback de env.`);
+          mailToRuntime = FALLBACK_MAIL_TO || mailFrom; // último recurso: remite a from
+        }
+
+        console.log(`[sales/addsale] Enviando email de venta a: ${mailToRuntime}`);
 
         await transporter.sendMail({
           from: mailFrom,
@@ -450,8 +455,6 @@ router.post('/addsale', async (req, res) => {
           subject: asunto,
           html
         });
-
-        console.log(`[sales/addsale] Email enviado a ${mailToRuntime}`);
       } catch (e) {
         console.warn('[sales/addsale] No se pudo enviar correo:', e?.message);
       }
@@ -540,13 +543,11 @@ router.put('/updatesale/:invoice_number', async (req, res) => {
             : [];
 
       if (ProductSale && rawItems.length > 0) {
-        // borrar detalle anterior
         await ProductSale.destroy({
           where: { invoice_number: invoice.invoice_number },
           transaction: t
         });
 
-        // insertar detalle nuevo
         const rows = buildProductSalesRows(invoice.invoice_number, rawItems);
         if (rows.length > 0) {
           await ProductSale.bulkCreate(rows, { transaction: t });
@@ -577,7 +578,6 @@ router.delete('/deletesale/:invoice_number', async (req, res) => {
       return res.status(404).json({ error: 'Factura no encontrada' });
     }
 
-    // Borrar detalle asociado
     if (ProductSale) {
       try {
         await ProductSale.destroy({
@@ -736,8 +736,6 @@ router.post('/vendedor-stats', async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // VENTAS DE UN DÍA ESPECÍFICO
-// GET /sales/by-day?date=YYYY-MM-DD[&vendedor_id=##]
-// GET /sales/day/:date
 // ─────────────────────────────────────────────────────────────────────────────
 router.get(['/by-day', '/day/:date'], async (req, res) => {
   try {
@@ -934,4 +932,5 @@ router.get('/invoices/latest', async (req, res) => {
 });
 
 module.exports = router;
+
 
