@@ -734,123 +734,96 @@ router.post('/vendedor-stats', async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// VENTAS DE UN DÍA ESPECÍFICO
-// ─────────────────────────────────────────────────────────────────────────────
-// ─────────────────────────────────────────────────────────────────────────────
+
 // VENTAS DE UN DÍA ESPECÍFICO (robusto a zona horaria)
 // GET /api/sales/by-day?date=YYYY-MM-DD[&vendedor_id=##]
 // GET /api/sales/day/:date
-// ─────────────────────────────────────────────────────────────────────────────
+const LOCAL_TZ = process.env.LOCAL_TZ || '-04:00';
+
 router.get(['/by-day', '/day/:date'], async (req, res) => {
   try {
-    // 1) Fecha pedida (solo YYYY-MM-DD)
+    // 1) Fecha (YYYY-MM-DD)
     const dateStr = String((req.query.date || req.params.date || '')).trim().slice(0, 10);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-      return res.status(400).json({
-        success: false,
-        error: "Parámetro 'date' inválido. Formato esperado: YYYY-MM-DD"
-      });
+      return res.status(400).json({ success: false, error: "Parámetro 'date' inválido. Formato: YYYY-MM-DD" });
     }
 
-    // 2) Filtro opcional por vendedor
+    // 2) Filtro opcional vendedor
     const vendedorId = (req.query.vendedor_id != null && String(req.query.vendedor_id).trim() !== '')
       ? String(req.query.vendedor_id).trim()
       : null;
 
-    // 3) Agregados del día (todo con DATE(date_time) = ?)
-    const paramsAgg = [dateStr];
-    let whereAgg = 'WHERE DATE(date_time) = ?';
-    if (vendedorId) {
-      whereAgg += ' AND COALESCE(vendedor_id, 0) = ?';
-      paramsAgg.push(vendedorId);
-    }
-
+    // 3) Resumen del día LOCAL (DB en UTC)
     const aggSql = `
       SELECT
-        COUNT(*)                                                AS cantidad_facturas,
-        SUM(ABS(COALESCE(total,0)))                             AS total_ventas,
+        COUNT(*)                                                          AS cantidad_facturas,
+        SUM(ABS(COALESCE(total,0)))                                       AS total_ventas,
         SUM(CASE WHEN LOWER(COALESCE(payment_method,''))='cash'
-                 THEN ABS(COALESCE(total,0)) ELSE 0 END)        AS total_contado,
+                 THEN ABS(COALESCE(total,0)) ELSE 0 END)                  AS total_contado,
         SUM(CASE WHEN LOWER(COALESCE(payment_method,''))='credit'
-                 THEN ABS(COALESCE(total,0)) ELSE 0 END)        AS total_credito,
-        SUM(COALESCE(paid_amount,0))                            AS total_pagado,
+                 THEN ABS(COALESCE(total,0)) ELSE 0 END)                  AS total_credito,
+        SUM(COALESCE(paid_amount,0))                                      AS total_pagado,
         SUM(CASE WHEN LOWER(COALESCE(payment_method,''))='credit'
                  THEN GREATEST(ABS(COALESCE(total,0)) - COALESCE(paid_amount,0), 0)
-                 ELSE 0 END)                                    AS balance_pendiente
+                 ELSE 0 END)                                              AS balance_pendiente
       FROM invoices
-      ${whereAgg}
+      WHERE DATE(CONVERT_TZ(date_time,'+00:00', :tz)) = :date
+      ${vendedorId ? 'AND COALESCE(vendedor_id,0)=:vId' : ''}
     `;
     const [agg] = await sequelize.query(aggSql, {
-      replacements: paramsAgg,
+      replacements: { tz: LOCAL_TZ, date: dateStr, ...(vendedorId ? { vId: vendedorId } : {}) },
       type: QueryTypes.SELECT
     });
 
-    // 4) Listado de facturas del día
-    const whereList = {
-      [Op.and]: [
-        // DATE(date_time) = :date  (versión Sequelize)
-        sequelize.where(sequelize.fn('DATE', sequelize.col('date_time')), dateStr),
-      ]
-    };
-    if (vendedorId) whereList[Op.and].push({ vendedor_id: vendedorId });
-
-    const rows = await Invoice.findAll({
-      where: whereList,
-      order: [['date_time', 'DESC']],
-      attributes: {
-        include: [
-          [sequelize.literal('ABS(COALESCE(total,0))'), 'abs_total'],
-          [
-            sequelize.literal(
-              "CASE WHEN LOWER(COALESCE(payment_method,''))='credit' " +
-              "THEN GREATEST(ABS(COALESCE(total,0)) - COALESCE(paid_amount,0), 0) " +
-              "ELSE 0 END"
-            ),
-            'balance'
-          ]
-        ]
-      },
-      raw: true
+    // 4) Listado de facturas del día LOCAL
+    const listSql = `
+      SELECT
+        invoice_number,
+        date_time,
+        customer_name,
+        COALESCE(vendedor_id,0)                                           AS vendedor_id,
+        LOWER(COALESCE(payment_method,''))                                 AS payment_method,
+        ABS(COALESCE(total,0))                                            AS total,
+        COALESCE(paid_amount,0)                                           AS paid_amount,
+        CASE WHEN LOWER(COALESCE(payment_method,''))='credit'
+             THEN GREATEST(ABS(COALESCE(total,0)) - COALESCE(paid_amount,0), 0)
+             ELSE 0 END                                                   AS balance
+      FROM invoices
+      WHERE DATE(CONVERT_TZ(date_time,'+00:00', :tz)) = :date
+      ${vendedorId ? 'AND COALESCE(vendedor_id,0)=:vId' : ''}
+      ORDER BY date_time DESC
+    `;
+    const facturas = await sequelize.query(listSql, {
+      replacements: { tz: LOCAL_TZ, date: dateStr, ...(vendedorId ? { vId: vendedorId } : {}) },
+      type: QueryTypes.SELECT
     });
 
-    const facturas = rows.map(r => ({
-      ...r,
-      total: Number(r.abs_total ?? r.total ?? 0),
-      balance: Number(r.balance ?? 0),
-    }));
-
-    // 5) Desglose por vendedor del mismo día
-    const paramsVend = [dateStr];
-    let whereVend = 'WHERE DATE(date_time) = ?';
-    if (vendedorId) {
-      whereVend += ' AND COALESCE(vendedor_id, 0) = ?';
-      paramsVend.push(vendedorId);
-    }
-
+    // 5) Desglose por vendedor (día LOCAL)
     const bySellerSql = `
       SELECT
-        COALESCE(vendedor_id, 0)                                AS vendedor_id,
-        COUNT(invoice_number)                                   AS cantidad_ventas,
-        SUM(ABS(COALESCE(total,0)))                             AS total_ventas,
+        COALESCE(vendedor_id, 0)                                          AS vendedor_id,
+        COUNT(invoice_number)                                             AS cantidad_ventas,
+        SUM(ABS(COALESCE(total,0)))                                       AS total_ventas,
         SUM(CASE WHEN LOWER(COALESCE(payment_method,''))='cash'
-                 THEN ABS(COALESCE(total,0)) ELSE 0 END)        AS total_contado,
+                 THEN ABS(COALESCE(total,0)) ELSE 0 END)                  AS total_contado,
         SUM(CASE WHEN LOWER(COALESCE(payment_method,''))='credit'
-                 THEN ABS(COALESCE(total,0)) ELSE 0 END)        AS total_credito,
-        SUM(COALESCE(paid_amount,0))                            AS total_pagado,
+                 THEN ABS(COALESCE(total,0)) ELSE 0 END)                  AS total_credito,
+        SUM(COALESCE(paid_amount,0))                                      AS total_pagado,
         SUM(CASE WHEN LOWER(COALESCE(payment_method,''))='credit'
                  THEN GREATEST(ABS(COALESCE(total,0)) - COALESCE(paid_amount,0), 0)
-                 ELSE 0 END)                                    AS balance_pendiente
+                 ELSE 0 END)                                              AS balance_pendiente
       FROM invoices
-      ${whereVend}
+      WHERE DATE(CONVERT_TZ(date_time,'+00:00', :tz)) = :date
+      ${vendedorId ? 'AND COALESCE(vendedor_id,0)=:vId' : ''}
       GROUP BY COALESCE(vendedor_id, 0)
       ORDER BY total_ventas DESC
     `;
     const breakdown = await sequelize.query(bySellerSql, {
-      replacements: paramsVend,
+      replacements: { tz: LOCAL_TZ, date: dateStr, ...(vendedorId ? { vId: vendedorId } : {}) },
       type: QueryTypes.SELECT
     });
 
+    // 6) Respuesta
     return res.json({
       success: true,
       date: dateStr,
@@ -867,7 +840,7 @@ router.get(['/by-day', '/day/:date'], async (req, res) => {
       invoices: facturas
     });
   } catch (error) {
-    console.error('❌ sales/by-day:', error);
+    console.error('❌ sales/by-day (tz):', error);
     res.status(500).json({ success: false, error: 'Error al obtener ventas del día', details: error.message });
   }
 });
