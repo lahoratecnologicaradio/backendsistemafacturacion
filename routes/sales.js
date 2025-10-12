@@ -737,10 +737,15 @@ router.post('/vendedor-stats', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // VENTAS DE UN DÍA ESPECÍFICO
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// VENTAS DE UN DÍA ESPECÍFICO (robusto a zona horaria)
+// GET /api/sales/by-day?date=YYYY-MM-DD[&vendedor_id=##]
+// GET /api/sales/day/:date
+// ─────────────────────────────────────────────────────────────────────────────
 router.get(['/by-day', '/day/:date'], async (req, res) => {
   try {
-    const dateStr = (req.query.date || req.params.date || '').trim();
-
+    // 1) Fecha pedida (solo YYYY-MM-DD)
+    const dateStr = String((req.query.date || req.params.date || '')).trim().slice(0, 10);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
       return res.status(400).json({
         success: false,
@@ -748,13 +753,14 @@ router.get(['/by-day', '/day/:date'], async (req, res) => {
       });
     }
 
-    const start = new Date(`${dateStr}T00:00:00.000`);
-    const end   = new Date(`${dateStr}T23:59:59.999`);
+    // 2) Filtro opcional por vendedor
+    const vendedorId = (req.query.vendedor_id != null && String(req.query.vendedor_id).trim() !== '')
+      ? String(req.query.vendedor_id).trim()
+      : null;
 
-    const vendedorId = req.query.vendedor_id != null ? String(req.query.vendedor_id).trim() : null;
-
-    const paramsAgg = [start, end];
-    let whereAgg = 'WHERE date_time BETWEEN ? AND ?';
+    // 3) Agregados del día (todo con DATE(date_time) = ?)
+    const paramsAgg = [dateStr];
+    let whereAgg = 'WHERE DATE(date_time) = ?';
     if (vendedorId) {
       whereAgg += ' AND COALESCE(vendedor_id, 0) = ?';
       paramsAgg.push(vendedorId);
@@ -775,14 +781,19 @@ router.get(['/by-day', '/day/:date'], async (req, res) => {
       FROM invoices
       ${whereAgg}
     `;
-
     const [agg] = await sequelize.query(aggSql, {
       replacements: paramsAgg,
       type: QueryTypes.SELECT
     });
 
-    const whereList = { date_time: { [Op.between]: [start, end] } };
-    if (vendedorId) whereList.vendedor_id = vendedorId;
+    // 4) Listado de facturas del día
+    const whereList = {
+      [Op.and]: [
+        // DATE(date_time) = :date  (versión Sequelize)
+        sequelize.where(sequelize.fn('DATE', sequelize.col('date_time')), dateStr),
+      ]
+    };
+    if (vendedorId) whereList[Op.and].push({ vendedor_id: vendedorId });
 
     const rows = await Invoice.findAll({
       where: whereList,
@@ -806,15 +817,17 @@ router.get(['/by-day', '/day/:date'], async (req, res) => {
     const facturas = rows.map(r => ({
       ...r,
       total: Number(r.abs_total ?? r.total ?? 0),
-      balance: Number(r.balance ?? 0)
+      balance: Number(r.balance ?? 0),
     }));
 
-    const paramsVend = [start, end];
-    let whereVend = 'WHERE date_time BETWEEN ? AND ?';
+    // 5) Desglose por vendedor del mismo día
+    const paramsVend = [dateStr];
+    let whereVend = 'WHERE DATE(date_time) = ?';
     if (vendedorId) {
       whereVend += ' AND COALESCE(vendedor_id, 0) = ?';
       paramsVend.push(vendedorId);
     }
+
     const bySellerSql = `
       SELECT
         COALESCE(vendedor_id, 0)                                AS vendedor_id,
@@ -858,6 +871,7 @@ router.get(['/by-day', '/day/:date'], async (req, res) => {
     res.status(500).json({ success: false, error: 'Error al obtener ventas del día', details: error.message });
   }
 });
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ÚLTIMOS N PEDIDOS
