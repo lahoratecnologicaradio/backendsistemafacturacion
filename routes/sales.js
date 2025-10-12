@@ -77,9 +77,11 @@ const QTY_FIELD = 'qty';
 const LOW_STOCK_THRESHOLD = Number(process.env.LOW_STOCK_THRESHOLD || 1000);
 
 // ─────────────────────────────────────────────────────────────────────────────
-/** Email / SMTP (usar variables de entorno) — configuración TLS */
+// Email / SMTP (usar variables de entorno) — configuración TLS
+// ─────────────────────────────────────────────────────────────────────────────
 const mailFrom = process.env.MAIL_FROM || process.env.SMTP_USER || 'ventas@example.com';
-const mailTo   = process.env.SALES_TO || process.env.MAIL_TO || 'ventas@example.com';
+// Fallback si no hay registro en DB:
+const FALLBACK_MAIL_TO = process.env.SALES_TO || process.env.MAIL_TO || 'ventas@example.com';
 
 const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com';
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
@@ -98,6 +100,31 @@ const transporter = nodemailer.createTransport({
     servername: SMTP_HOST,
   },
 });
+
+// Lee el correo destino desde la tabla correo_configuracion.
+// Regresa el correo activo más reciente o el fallback si no hay.
+async function getSalesEmailTo() {
+  try {
+    // Si tu tabla NO tiene columna 'activo', elimina "WHERE activo=1"
+    const rows = await sequelize.query(
+      `SELECT correo
+         FROM correo_configuracion
+        WHERE COALESCE(activo, 1) = 1
+        ORDER BY id DESC
+        LIMIT 1`,
+      { type: QueryTypes.SELECT }
+    );
+    const correo = rows?.[0]?.correo ? String(rows[0].correo).trim() : null;
+
+    if (correo) return correo;
+
+    console.warn('[sales] No se encontró correo activo en correo_configuracion; usando fallback.');
+    return FALLBACK_MAIL_TO;
+  } catch (e) {
+    console.warn('[sales] Error leyendo correo_configuracion; usando fallback. Detalle:', e?.message);
+    return FALLBACK_MAIL_TO;
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper para construir filas de productsales EXACTAMENTE con:
@@ -182,15 +209,6 @@ router.get('/invoices/seller/:vendedorId', async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CREAR FACTURA + guardar detalle productsales + actualizar qty + email
-// Body:
-// {
-//   invoice_number, date_time, customer_name, total, cash, change,
-//   vendedor_id, payment_method ('cash'|'credit'),
-//   customer_id?, zona?,
-//   items|products|cartItems: [
-//     { product_id|id|productId, product_name|name|title, quantity|qty|cantidad, price|unit_price|precio, discount?, amount? }
-//   ]
-// }
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/addsale', async (req, res) => {
   const t = await sequelize.transaction();
@@ -279,8 +297,8 @@ router.post('/addsale', async (req, res) => {
     // 4) Descontar **qty** del inventario (SOLO `qty`)
     if (!Product) {
       console.warn('[sales/addsale] No hay modelo Product; se omite actualización de qty.');
-    } else if (!Product.rawAttributes?.qty) {
-      console.warn("[sales/addsale] El modelo Product no tiene el campo 'qty'. Revisa el modelo/DB.");
+    } else if (!Product.rawAttributes?.[QTY_FIELD]) {
+      console.warn(`[sales/addsale] El modelo Product no tiene el campo '${QTY_FIELD}'. Revisa el modelo/DB.`);
     } else {
       for (const it of rawItems) {
         const product_id   = it.product_id ?? it.productId ?? it.id ?? null;
@@ -302,18 +320,18 @@ router.post('/addsale', async (req, res) => {
         } else {
           // Leer qty actual (solo para mostrar en correo/log)
           const beforeRow = await Product.findByPk(product_id, {
-            attributes: ['id', 'product_name', 'qty'],
+            attributes: ['id', 'product_name', QTY_FIELD],
             transaction: t
           });
 
           if (!beforeRow) {
             console.warn(`[sales/addsale] Producto id=${product_id} no encontrado; no se actualiza qty.`);
           } else {
-            qtyBefore = Number(beforeRow.get('qty')) || 0;
+            qtyBefore = Number(beforeRow.get(QTY_FIELD)) || 0;
 
             // UPDATE portable: qty = CASE WHEN qty >= :by THEN qty - :by ELSE 0 END
             const [affected] = await Product.update(
-              { qty: sequelize.literal(`CASE WHEN qty >= ${quantity} THEN qty - ${quantity} ELSE 0 END`) },
+              { [QTY_FIELD]: sequelize.literal(`CASE WHEN ${QTY_FIELD} >= ${quantity} THEN ${QTY_FIELD} - ${quantity} ELSE 0 END`) },
               { where: { id: product_id }, transaction: t }
             );
 
@@ -322,10 +340,10 @@ router.post('/addsale', async (req, res) => {
             }
 
             const afterRow = await Product.findByPk(product_id, {
-              attributes: ['id', 'product_name', 'qty'],
+              attributes: ['id', 'product_name', QTY_FIELD],
               transaction: t
             });
-            qtyAfter = afterRow ? (Number(afterRow.get('qty')) || 0) : null;
+            qtyAfter = afterRow ? (Number(afterRow.get(QTY_FIELD)) || 0) : null;
 
             console.log(`[sales/addsale] Producto ${product_id} — qty: ${qtyBefore} -> ${qtyAfter} (venta: ${quantity})`);
           }
@@ -377,8 +395,8 @@ router.post('/addsale', async (req, res) => {
         const rowsHtml = (itemsWithQty || []).map(it => {
           const price = formatoRD.format(Number(it.unit_price || 0));
           const sub   = formatoRD.format(Number(it.subtotal || 0));
-          const before = (it.qty_before == null) ? '—' : it.qty_before.toLocaleString('es-DO');
-          const after  = (it.qty_after  == null) ? '—' : it.qty_after.toLocaleString('es-DO');
+          const before = (it.qty_before == null) ? '—' : Number(it.qty_before).toLocaleString('es-DO');
+          const after  = (it.qty_after  == null) ? '—' : Number(it.qty_after).toLocaleString('es-DO');
 
           return `
             <tr>
@@ -423,12 +441,17 @@ router.post('/addsale', async (req, res) => {
           </div>
         `;
 
+        // ←↓↓ correo destino desde DB
+        const mailToRuntime = await getSalesEmailTo();
+
         await transporter.sendMail({
           from: mailFrom,
-          to: mailTo,
+          to: mailToRuntime,
           subject: asunto,
           html
         });
+
+        console.log(`[sales/addsale] Email enviado a ${mailToRuntime}`);
       } catch (e) {
         console.warn('[sales/addsale] No se pudo enviar correo:', e?.message);
       }
@@ -460,10 +483,8 @@ router.get('/getsale/:invoice_number', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-/** ACTUALIZAR POR invoice_number
- *  - si envías payment_method/paid_amount/paid_at también se actualizan
- *  - si envías items/products/cartItems se REEMPLAZA el detalle en productsales
- */
+// ACTUALIZAR POR invoice_number
+// ─────────────────────────────────────────────────────────────────────────────
 router.put('/updatesale/:invoice_number', async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -545,7 +566,7 @@ router.put('/updatesale/:invoice_number', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-/** ELIMINAR POR invoice_number (borra también el detalle productsales) */
+// ELIMINAR POR invoice_number (borra también el detalle productsales)
 // ─────────────────────────────────────────────────────────────────────────────
 router.delete('/deletesale/:invoice_number', async (req, res) => {
   const t = await sequelize.transaction();
@@ -720,7 +741,6 @@ router.post('/vendedor-stats', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 router.get(['/by-day', '/day/:date'], async (req, res) => {
   try {
-    // 1) Tomamos la fecha desde query o params
     const dateStr = (req.query.date || req.params.date || '').trim();
 
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
@@ -730,14 +750,11 @@ router.get(['/by-day', '/day/:date'], async (req, res) => {
       });
     }
 
-    // 2) Construimos rango [inicio, fin] del día
     const start = new Date(`${dateStr}T00:00:00.000`);
     const end   = new Date(`${dateStr}T23:59:59.999`);
 
-    // 3) Filtro opcional por vendedor
     const vendedorId = req.query.vendedor_id != null ? String(req.query.vendedor_id).trim() : null;
 
-    // 4) Agregados rápidos (SQL crudo para portabilidad y performance)
     const paramsAgg = [start, end];
     let whereAgg = 'WHERE date_time BETWEEN ? AND ?';
     if (vendedorId) {
@@ -766,10 +783,7 @@ router.get(['/by-day', '/day/:date'], async (req, res) => {
       type: QueryTypes.SELECT
     });
 
-    // 5) Listado de facturas del día (normalizado: total en positivo)
-    const whereList = {
-      date_time: { [Op.between]: [start, end] }
-    };
+    const whereList = { date_time: { [Op.between]: [start, end] } };
     if (vendedorId) whereList.vendedor_id = vendedorId;
 
     const rows = await Invoice.findAll({
@@ -797,7 +811,6 @@ router.get(['/by-day', '/day/:date'], async (req, res) => {
       balance: Number(r.balance ?? 0)
     }));
 
-    // 6) (Opcional) Desglose por vendedor para ese día
     const paramsVend = [start, end];
     let whereVend = 'WHERE date_time BETWEEN ? AND ?';
     if (vendedorId) {
@@ -849,35 +862,28 @@ router.get(['/by-day', '/day/:date'], async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ÚLTIMOS N PEDIDOS (por defecto 5)
-// GET /invoices/latest            → últimos 5
-// GET /invoices/latest?limit=10   → últimos 10 (tope 50)
-// Devuelve: cliente, vendedor, método, total(+), pagado, balance, estado_credito
+// ÚLTIMOS N PEDIDOS
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/invoices/latest', async (req, res) => {
   try {
     const limit = Math.max(1, Math.min(Number(req.query.limit) || 5, 50));
 
-    // Traemos las últimas facturas
     const rows = await Invoice.findAll({
       order: [['date_time', 'DESC']],
       limit,
       attributes: {
         include: [
-          // total siempre positivo para UI
           [sequelize.literal('ABS(COALESCE(total,0))'), 'abs_total']
         ]
       },
       raw: true
     });
 
-    // Map de vendedores (si existe el modelo)
     let vendedorById = {};
     try {
       if (Vendedor) {
         const ids = [...new Set(rows.map(r => r.vendedor_id).filter(v => v != null))];
         if (ids.length > 0) {
-          // Asumimos PK = id y columna nombre = 'nombre'
           const vendedores = await Vendedor.findAll({
             where: { id: ids },
             attributes: ['id', 'nombre'],
@@ -928,3 +934,4 @@ router.get('/invoices/latest', async (req, res) => {
 });
 
 module.exports = router;
+
